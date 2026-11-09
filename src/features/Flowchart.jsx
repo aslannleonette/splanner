@@ -13,7 +13,7 @@ import ReactFlow, {
 } from 'reactflow'
 import 'reactflow/dist/style.css'
 
-import { C, FONT_BODY, FONT_DISPLAY } from '../tokens'
+import { C, FONT_BODY, FONT_DISPLAY, STATUS_MAT } from '../tokens'
 import { Btn, Badge, Icon, Modal, Input, Select, Textarea, ProgressBar, Spinner, Alert, Empty, Label } from '../components/ui'
 import {
   updateActivityFields,
@@ -25,6 +25,7 @@ import {
   deleteActivityDoc,
   upsertMaterial,
   deleteMaterial,
+  updateMaterialStatus,
   fetchReports,
   linkReportToActivity,
   unlinkReportFromActivity,
@@ -51,11 +52,14 @@ function groupColor(name = '') {
   return GROUP_PALETTE[h % GROUP_PALETTE.length]
 }
 
-// ─── Auto layout (topological levels) — only for nodes with no saved position ──
-const COL_W = 240
-const ROW_H = 150
+// ─── Auto layout (vertical chain) — only for nodes with no saved position ──
+// O fluxograma é sempre vertical: cada etapa fica numa linha única, uma
+// abaixo da outra, seguindo a ordem de dependência (predecessor_ids).
+// Quando uma etapa não tem predecessor definido, cai no fim da cadeia
+// principal (ordem de order_index), então o fluxo nunca "abre" na horizontal.
+const ROW_H = 210
 
-function layout(activities) {
+function computeLevels(activities) {
   const byId = Object.fromEntries(activities.map(a => [a.id, a]))
   const level = {}
   function calcLevel(a, seen) {
@@ -68,18 +72,19 @@ function layout(activities) {
     return lvl
   }
   activities.forEach(a => calcLevel(a, new Set()))
+  return level
+}
 
-  const countPerLevel = {}
+function layout(activities) {
+  const level = computeLevels(activities)
   const pos = {}
   activities.forEach(a => {
     if (a.flow_x != null && a.flow_y != null) {
-      pos[a.id] = { x: Number(a.flow_x), y: Number(a.flow_y) }
+      pos[a.id] = { x: 0, y: Number(a.flow_y) }
       return
     }
     const lvl = level[a.id] || 0
-    const idx = countPerLevel[lvl] || 0
-    countPerLevel[lvl] = idx + 1
-    pos[a.id] = { x: idx * COL_W, y: lvl * ROW_H }
+    pos[a.id] = { x: 0, y: lvl * ROW_H }
   })
   return pos
 }
@@ -87,48 +92,122 @@ function layout(activities) {
 // ─── Node card ──────────────────────────────────────────────────────────────
 function ActivityNode({ data }) {
   const a = data.activity
+  const mats = data.materials || []
   const sc = STATUS_COLORS[a.status] || STATUS_COLORS.nao_iniciado
   const gcolor = groupColor(a.group_name || 'Geral')
+  const hasObs = !!(a.observacoes && a.observacoes.trim())
+  const matsUrgent = mats.some(m => m.status === 'urgente')
+  const matsPendente = mats.some(m => m.status === 'pendente' || m.status === 'pedido')
+  const showAlert = hasObs || mats.some(m => m.status !== 'chegou')
+  const alertColor = matsUrgent ? C.red : (hasObs || matsPendente) ? C.amber : C.gray500
+  const alertBg = matsUrgent ? C.redLight : (hasObs || matsPendente) ? C.amberLight : C.gray100
+  const hasPredecessor = !!(a.predecessor_ids && a.predecessor_ids.length)
+  const hasDependents = !!data.hasDependents
+  const HANDLE_SIZE = 24
+  const handleBaseStyle = {
+    width: HANDLE_SIZE, height: HANDLE_SIZE, border: `2.5px solid ${C.white}`,
+    left: '50%', transform: 'translateX(-50%)', zIndex: 3,
+    boxShadow: '0 1px 4px rgba(0,0,0,0.25)',
+  }
+  const dotOverlayStyle = (connected) => ({
+    position: 'absolute', left: '50%', transform: 'translateX(-50%)',
+    width: HANDLE_SIZE, height: HANDLE_SIZE, display: 'flex', alignItems: 'center', justifyContent: 'center',
+    pointerEvents: 'none', color: C.white, fontWeight: 800, fontSize: 15, lineHeight: 1, zIndex: 4,
+  })
   return (
-    <div
-      onClick={() => data.onOpen(a)}
-      style={{
-        width: 210,
-        background: C.white,
-        borderRadius: 10,
-        border: `1.5px solid ${C.gray200}`,
-        borderLeft: `5px solid ${gcolor}`,
-        boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
-        padding: '10px 12px',
-        fontFamily: FONT_BODY,
-        cursor: 'pointer',
-      }}
-      title="Clique para abrir os detalhes da etapa"
-    >
-      <Handle type="target" position={Position.Top} style={{ background: C.gray400, width: 8, height: 8 }} />
-      <div style={{
-        fontSize: 9, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase',
-        color: gcolor, marginBottom: 3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-      }}>
-        {a.group_name || 'Geral'}
-      </div>
-      <div style={{
-        fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 14, color: C.black,
-        lineHeight: 1.2, marginBottom: 8,
-      }}>
-        {a.name || '(sem nome)'}
-      </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
-        <Badge label={STATUS_OPTIONS.find(s => s.value === a.status)?.label || a.status} cor={sc.cor} bg={sc.bg} />
-        {a.status === 'atrasado' && (
-          <Icon name="warning" size={14} color={C.red} />
+    <div style={{ position: 'relative' }}>
+      <div
+        onClick={() => data.onOpen(a)}
+        style={{
+          width: 280,
+          background: C.white,
+          borderRadius: 12,
+          border: `1.5px solid ${C.gray200}`,
+          borderLeft: `6px solid ${gcolor}`,
+          boxShadow: '0 2px 10px rgba(0,0,0,0.08)',
+          padding: '14px 16px',
+          fontFamily: FONT_BODY,
+          cursor: 'pointer',
+        }}
+        title="Clique para abrir os detalhes da etapa"
+      >
+        {a.status === 'concluido' && (
+          <div style={{
+            position: 'absolute', top: -11, right: 18, zIndex: 4,
+            width: 22, height: 22, borderRadius: '50%', background: C.green,
+            border: `2px solid ${C.white}`, display: 'flex', alignItems: 'center', justifyContent: 'center',
+            boxShadow: '0 1px 4px rgba(0,0,0,0.2)',
+          }}>
+            <Icon name="check" size={12} color={C.white} />
+          </div>
         )}
+        <Handle
+          type="target"
+          position={Position.Top}
+          style={{ ...handleBaseStyle, top: -HANDLE_SIZE / 2, background: hasPredecessor ? C.orange : C.gray400 }}
+        />
+        <div style={{ ...dotOverlayStyle(hasPredecessor), top: -HANDLE_SIZE / 2 }}>{hasPredecessor ? '−' : '+'}</div>
+        <div style={{
+          fontSize: 11, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase',
+          color: gcolor, marginBottom: 5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+        }}>
+          {a.group_name || 'Geral'}
+        </div>
+        <div style={{
+          fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 18, color: C.black,
+          lineHeight: 1.25, marginBottom: 10,
+        }}>
+          {a.name || '(sem nome)'}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+          <Badge label={STATUS_OPTIONS.find(s => s.value === a.status)?.label || a.status} cor={sc.cor} bg={sc.bg} />
+          {a.status === 'atrasado' && (
+            <Icon name="warning" size={16} color={C.red} />
+          )}
+        </div>
+        <ProgressBar pct={a.pct || 0} color={sc.cor === C.gray500 ? C.gray300 : sc.cor} height={6} />
+        <div style={{ fontSize: 12, color: C.gray400, marginTop: 6 }}>
+          S{a.week_start}–S{a.week_end} · {a.pct || 0}%
+        </div>
+        {showAlert && (
+          <div
+            title={[
+              hasObs ? `Observação: ${a.observacoes}` : null,
+              mats.length ? `${mats.length} material(is): ${mats.map(m => `${m.name}${m.responsible_name ? ' (' + m.responsible_name + ')' : ''}`).join(', ')}` : null,
+            ].filter(Boolean).join('\n')}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 6, marginTop: 8,
+              padding: '5px 8px', borderRadius: 7, background: alertBg,
+            }}
+          >
+            <Icon name="warning" size={13} color={alertColor} />
+            <div style={{ fontSize: 11, color: alertColor, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {hasObs ? a.observacoes : `${mats.length} material${mats.length > 1 ? 'is' : ''}${mats.length ? ': ' + mats.map(m => m.name).join(', ') : ''}`}
+            </div>
+          </div>
+        )}
+        <Handle
+          type="source"
+          position={Position.Bottom}
+          style={{ ...handleBaseStyle, bottom: -HANDLE_SIZE / 2, background: hasDependents ? C.orange : C.gray400 }}
+        />
+        <div style={{ ...dotOverlayStyle(hasDependents), bottom: -HANDLE_SIZE / 2 }}>{hasDependents ? '−' : '+'}</div>
       </div>
-      <ProgressBar pct={a.pct || 0} color={sc.cor === C.gray500 ? C.gray300 : sc.cor} height={5} />
-      <div style={{ fontSize: 10, color: C.gray400, marginTop: 4 }}>
-        S{a.week_start}–S{a.week_end} · {a.pct || 0}%
-      </div>
-      <Handle type="source" position={Position.Bottom} style={{ background: C.gray400, width: 8, height: 8 }} />
+      {data.onInsertAfter && (
+        <button
+          onClick={(e) => { e.stopPropagation(); data.onInsertAfter(a) }}
+          title="Inserir nova etapa depois desta"
+          style={{
+            position: 'absolute', top: '50%', right: -16, transform: 'translateY(-50%)',
+            width: 26, height: 26, borderRadius: '50%', border: `2px solid ${C.white}`,
+            background: C.black, color: C.white, cursor: 'pointer', zIndex: 5,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: 15, fontWeight: 800, lineHeight: 1, boxShadow: '0 2px 6px rgba(0,0,0,0.25)',
+          }}
+        >
+          +
+        </button>
+      )}
     </div>
   )
 }
@@ -139,12 +218,30 @@ const nodeTypes = { activityNode: ActivityNode }
 export default function Flowchart({ projectId, userId, project, activities = [], materials = [], currentWeek, aiLogs = [], onActivityPatch, onActivityCreated, onActivityDeleted, onSaveAiLog }) {
   const positions = useMemo(() => layout(activities), [activities])
 
+  const materialsByActivity = useMemo(() => {
+    const m = {}
+    materials.forEach(x => { (m[x.activity_id] ||= []).push(x) })
+    return m
+  }, [materials])
+
+  const hasDependentsSet = useMemo(() => {
+    const s = new Set()
+    activities.forEach(a => (a.predecessor_ids || []).forEach(pid => s.add(pid)))
+    return s
+  }, [activities])
+
   const initialNodes = useMemo(() => activities.map(a => ({
     id: a.id,
     type: 'activityNode',
     position: positions[a.id] || { x: 0, y: 0 },
-    data: { activity: a, onOpen: (act) => setOpenNode(act) },
-  })), [activities, positions]) // eslint-disable-line
+    data: {
+      activity: a,
+      materials: materialsByActivity[a.id] || [],
+      hasDependents: hasDependentsSet.has(a.id),
+      onOpen: (act) => setOpenNode(act),
+      onInsertAfter: (act) => handleInsertAfter(act),
+    },
+  })), [activities, positions, materialsByActivity, hasDependentsSet]) // eslint-disable-line
 
   const byId = useMemo(() => Object.fromEntries(activities.map(a => [a.id, a])), [activities])
 
@@ -171,11 +268,13 @@ export default function Flowchart({ projectId, userId, project, activities = [],
   const [openNode, setOpenNode] = useState(null)
   const [aiOpen, setAiOpen] = useState(false)
   const [saveError, setSaveError] = useState('')
+  const [showHelp, setShowHelp] = useState(false)
 
   // Re-sync when upstream activities change (e.g. edited elsewhere) without
   // losing in-flight drag state — simplest safe approach: replace fully.
   const lastActIds = useRef('')
-  const sig = activities.map(a => `${a.id}:${a.name}:${a.status}:${a.pct}:${a.flow_x}:${a.flow_y}:${(a.predecessor_ids || []).join(',')}`).join('|')
+  const matsSig = materials.map(m => `${m.activity_id}:${m.id}:${m.status}:${m.name}:${m.responsible_name || ''}`).join(',')
+  const sig = activities.map(a => `${a.id}:${a.name}:${a.status}:${a.pct}:${a.flow_x}:${a.flow_y}:${a.observacoes || ''}:${(a.predecessor_ids || []).join(',')}`).join('|') + '||' + matsSig
   if (sig !== lastActIds.current) {
     lastActIds.current = sig
     setNodes(initialNodes)
@@ -210,12 +309,16 @@ export default function Flowchart({ projectId, userId, project, activities = [],
   }, [byId, onActivityPatch])
 
   const onNodeDragStop = useCallback((evt, node) => {
-    const flow_x = node.position.x, flow_y = node.position.y
+    // Fluxograma é sempre vertical: trava o X em 0, só a ordem (Y) é livre.
+    const flow_x = 0, flow_y = node.position.y
+    if (node.position.x !== 0) {
+      setNodes(nds => nds.map(n => n.id === node.id ? { ...n, position: { x: 0, y: flow_y } } : n))
+    }
     onActivityPatch?.(node.id, { flow_x, flow_y })
     updateActivityFields(node.id, { flow_x, flow_y })
       .then(({ error }) => { if (error) setSaveError('Não consegui salvar a posição: ' + error.message) })
       .catch(err => setSaveError('Não consegui salvar a posição: ' + (err?.message || 'erro desconhecido')))
-  }, [onActivityPatch])
+  }, [onActivityPatch, setNodes])
 
   // Duplo clique num nó cancela (remove) os vínculos de dependência dele
   const onNodeDoubleClick = useCallback((evt, node) => {
@@ -229,8 +332,89 @@ export default function Flowchart({ projectId, userId, project, activities = [],
       .catch(err => setSaveError('Não consegui remover a dependência: ' + (err?.message || 'erro desconhecido')))
   }, [byId, onActivityPatch, setEdges])
 
+  // A IA do fluxograma age como agente: aplica diretivas LIGAR/PRAZO que ela
+  // propõe, reorganizando de verdade a rede (dependências + posição vertical)
+  // e persistindo no banco — não é só um chat de texto.
+  const [applyingAi, setApplyingAi] = useState(false)
+  async function handleApplyAiDirectives(ligarList, prazoList) {
+    if (!ligarList.length && !prazoList.length) return { applied: 0 }
+    setApplyingAi(true)
+    try {
+      const working = activities.map(a => ({ ...a }))
+      const byId = Object.fromEntries(working.map(a => [a.id, a]))
+      ligarList.forEach(({ id, predecessor_ids }) => { if (byId[id]) byId[id].predecessor_ids = predecessor_ids })
+      prazoList.forEach(({ id, week_start, week_end }) => {
+        if (byId[id]) { byId[id].week_start = week_start; byId[id].week_end = week_end }
+      })
+      const levels = computeLevels(working)
+      const touchedIds = new Set([...ligarList.map(x => x.id), ...prazoList.map(x => x.id)])
+      let applied = 0
+      for (const a of working) {
+        const newFlowY = (levels[a.id] || 0) * ROW_H
+        const changed = touchedIds.has(a.id) || Number(a.flow_y) !== newFlowY || Number(a.flow_x) !== 0
+        if (!changed) continue
+        const patch = {
+          predecessor_ids: a.predecessor_ids || [],
+          week_start: a.week_start,
+          week_end: a.week_end,
+          flow_x: 0,
+          flow_y: newFlowY,
+        }
+        onActivityPatch?.(a.id, patch)
+        const { error } = await updateActivityFields(a.id, patch)
+        if (error) { setSaveError('Não consegui aplicar a reorganização da IA: ' + error.message); continue }
+        applied++
+      }
+      return { applied }
+    } finally {
+      setApplyingAi(false)
+    }
+  }
+
+  // Botão "+" do card: insere uma nova etapa logo depois desta na cadeia
+  // vertical, reencaixando quem antes dependia dela para depender da nova.
+  async function handleInsertAfter(act) {
+    const dependents = activities.filter(x => (x.predecessor_ids || []).includes(act.id))
+    const baseY = Number(act.flow_y ?? 0)
+    const row = {
+      project_id: projectId,
+      name: 'Nova etapa',
+      group_name: act.group_name || 'Geral',
+      week_start: act.week_end || act.week_start || 1,
+      week_end: act.week_end || act.week_start || 1,
+      tipo: 'exec',
+      pct: 0,
+      status: 'nao_iniciado',
+      order_index: activities.length,
+      predecessor_ids: [act.id],
+      flow_x: 0,
+      flow_y: baseY + ROW_H / 2,
+    }
+    const { data, error } = await createActivity(row)
+    if (error || !data) {
+      setSaveError('Não consegui criar a etapa: ' + (error?.message || 'erro desconhecido'))
+      return
+    }
+    onActivityCreated?.(data)
+    for (const dep of dependents) {
+      const nextPreds = (dep.predecessor_ids || []).filter(id => id !== act.id).concat(data.id)
+      onActivityPatch?.(dep.id, { predecessor_ids: nextPreds })
+      updateActivityFields(dep.id, { predecessor_ids: nextPreds })
+        .then(({ error }) => { if (error) setSaveError('Não consegui reencadear a etapa seguinte: ' + error.message) })
+        .catch(err => setSaveError('Não consegui reencadear a etapa seguinte: ' + (err?.message || 'erro desconhecido')))
+    }
+    setOpenNode(data)
+  }
+
   async function handleAddStage() {
-    const maxY = activities.reduce((m, a) => Math.max(m, a.flow_y ?? 0), 0)
+    // Continua a cadeia vertical: a nova etapa entra depois da última
+    // (maior flow_y), com ela como predecessora — nunca abre uma coluna nova.
+    let last = null
+    activities.forEach(a => {
+      const y = Number(a.flow_y ?? 0)
+      if (!last || y > Number(last.flow_y ?? 0)) last = a
+    })
+    const maxY = last ? Number(last.flow_y ?? 0) : -ROW_H
     const row = {
       project_id: projectId,
       name: 'Nova etapa',
@@ -241,7 +425,7 @@ export default function Flowchart({ projectId, userId, project, activities = [],
       pct: 0,
       status: 'nao_iniciado',
       order_index: activities.length,
-      predecessor_ids: [],
+      predecessor_ids: last ? [last.id] : [],
       flow_x: 0,
       flow_y: maxY + ROW_H,
     }
@@ -290,13 +474,30 @@ export default function Flowchart({ projectId, userId, project, activities = [],
           </div>
         )}
       </div>
-      <div style={{ position: 'absolute', top: 12, right: 12, zIndex: 10, maxWidth: 280 }}>
-        <div style={{
-          background: 'rgba(255,255,255,0.92)', border: `1px solid ${C.gray200}`, borderRadius: 8,
-          padding: '6px 10px', fontSize: 11, color: C.gray500, lineHeight: 1.4,
-        }}>
-          Arraste de um card para outro para criar dependência. Selecione uma seta e aperte Delete para remover.
-        </div>
+      {/* Ajuda — discreta, não sobrepõe outros controles */}
+      <div style={{ position: 'absolute', top: 12, right: 12, zIndex: 10 }}>
+        <button
+          onClick={() => setShowHelp(h => !h)}
+          title="Ajuda"
+          style={{
+            width: 26, height: 26, borderRadius: '50%', border: `1px solid ${C.gray200}`,
+            background: 'rgba(255,255,255,0.92)', color: C.gray500, cursor: 'pointer',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: 13, fontWeight: 800, fontFamily: FONT_DISPLAY, boxShadow: '0 1px 4px rgba(0,0,0,0.1)',
+          }}
+        >
+          ?
+        </button>
+        {showHelp && (
+          <div style={{
+            position: 'absolute', top: 32, right: 0, width: 240,
+            background: C.white, border: `1px solid ${C.gray200}`, borderRadius: 8,
+            padding: '8px 10px', fontSize: 11, color: C.gray500, lineHeight: 1.5,
+            boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+          }}>
+            Arraste do ponto "+" de um card até outro pra criar dependência. Selecione uma seta e aperte Delete pra remover, ou dê dois cliques num nó pra remover as dependências dele.
+          </div>
+        )}
       </div>
 
       {/* Floating AI button */}
@@ -338,6 +539,7 @@ export default function Flowchart({ projectId, userId, project, activities = [],
           activities={activities}
           aiLogs={aiLogs}
           currentWeek={currentWeek}
+          onApplyDirectives={handleApplyAiDirectives}
           onSaveAiLog={onSaveAiLog}
           onClose={() => setAiOpen(false)}
         />
@@ -592,21 +794,42 @@ function MateriaisTab({ activity, materials, projectId }) {
     await deleteMaterial(id)
     setList(l => l.filter(m => m.id !== id))
   }
+  async function confirmMaterial(id) {
+    const { data, error } = await updateMaterialStatus(id, 'chegou')
+    if (!error) setList(l => l.map(m => m.id === id ? (data || { ...m, status: 'chegou' }) : m))
+  }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-      <div style={{ fontSize: 12, color: C.gray500 }}>Materiais previstos/usados nesta etapa.</div>
+      <div style={{ fontSize: 12, color: C.gray500 }}>Materiais previstos/usados nesta etapa. Dê o OK quando o material chegar pra sair da pendência.</div>
       {list.length === 0 && <Empty icon="package" text="Nenhum material vinculado" />}
-      {list.map(m => (
-        <div key={m.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', background: C.gray50, borderRadius: 6 }}>
-          <Icon name="package" size={14} color={C.gray500} />
-          <div style={{ flex: 1, fontSize: 13, color: C.black }}>{m.name} — {m.quantity} {m.unit}{m.responsible_name ? ` · Resp.: ${m.responsible_name}` : ''}</div>
-          <Badge label={m.status} bg={C.gray100} cor={C.gray700} />
-          <button onClick={() => removeMaterial(m.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.red }}>
-            <Icon name="x" size={14} />
-          </button>
-        </div>
-      ))}
+      {list.map(m => {
+        const sm = STATUS_MAT[m.status] || STATUS_MAT.pendente
+        const pending = m.status !== 'chegou'
+        return (
+          <div key={m.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', background: C.gray50, borderRadius: 6 }}>
+            <Icon name="package" size={14} color={C.gray500} />
+            <div style={{ flex: 1, fontSize: 13, color: C.black }}>{m.name} — {m.quantity} {m.unit}{m.responsible_name ? ` · Resp.: ${m.responsible_name}` : ''}</div>
+            <Badge label={sm.label} bg={sm.bg} cor={sm.cor} />
+            {pending && (
+              <button
+                onClick={() => confirmMaterial(m.id)}
+                title="Confirmar chegada do material (OK)"
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 4, border: 'none', cursor: 'pointer',
+                  background: C.greenLight, color: C.green, borderRadius: 6, padding: '4px 8px',
+                  fontSize: 11, fontWeight: 700,
+                }}
+              >
+                <Icon name="check" size={12} color={C.green} /> OK
+              </button>
+            )}
+            <button onClick={() => removeMaterial(m.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.red }}>
+              <Icon name="x" size={14} />
+            </button>
+          </div>
+        )
+      })}
       <div style={{ display: 'flex', gap: 6 }}>
         <Input style={{ flex: 1 }} placeholder="Material" value={name} onChange={e => setName(e.target.value)} />
         <Input style={{ width: 60 }} placeholder="Qtd" value={qtd} onChange={e => setQtd(e.target.value)} />
@@ -737,17 +960,47 @@ function RelatorioTab({ activity, projectId }) {
   )
 }
 
+// A IA responde em texto + propõe diretivas de reorganização ao final:
+//   LIGAR: [etapa] → depende de: [predecessora 1, predecessora 2]
+//   PRAZO: [etapa] → semana_inicio: N, semana_fim: M
+// Essas funções leem essas linhas e traduzem pros ids reais das atividades.
+function parseLigarDirectives(text, activities) {
+  const byName = new Map(activities.map(a => [a.name.trim().toLowerCase(), a]))
+  const out = []
+  text.split('\n').forEach(line => {
+    const m = line.match(/^LIGAR:\s*\[(.+?)\]\s*→\s*depende de:\s*\[(.*?)\]\s*$/)
+    if (!m) return
+    const act = byName.get(m[1].trim().toLowerCase())
+    if (!act) return
+    const predIds = m[2].split(',').map(s => s.trim()).filter(Boolean)
+      .map(n => byName.get(n.toLowerCase())?.id).filter(Boolean)
+    out.push({ id: act.id, predecessor_ids: predIds })
+  })
+  return out
+}
+function parsePrazoDirectives(text, activities) {
+  const byName = new Map(activities.map(a => [a.name.trim().toLowerCase(), a]))
+  const out = []
+  text.split('\n').forEach(line => {
+    const m = line.match(/^PRAZO:\s*\[(.+?)\]\s*→\s*semana_inicio:\s*(\d+),\s*semana_fim:\s*(\d+)/)
+    if (!m) return
+    const act = byName.get(m[1].trim().toLowerCase())
+    if (!act) return
+    out.push({ id: act.id, week_start: Number(m[2]), week_end: Number(m[3]) })
+  })
+  return out
+}
+function stripDirectiveLines(text) {
+  return text.split('\n').filter(l => !/^LIGAR:/.test(l) && !/^PRAZO:/.test(l)).join('\n').trim()
+}
+
 // ─── Painel de IA do fluxograma ──────────────────────────────────────────────
-function AIFluxoPanel({ project, activities, aiLogs, currentWeek, onSaveAiLog, onClose }) {
-  const [history, setHistory] = useState(
-    [...aiLogs].slice(0, 6).reverse().flatMap(l => ([
-      { role: 'user', content: l.user_question },
-      { role: 'assistant', content: l.ai_response },
-    ]))
-  )
+function AIFluxoPanel({ project, activities, currentWeek, onSaveAiLog, onApplyDirectives, onClose }) {
+  const [history, setHistory] = useState([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [applied, setApplied] = useState(0)
 
   async function send(message) {
     const msg = message || input
@@ -763,8 +1016,17 @@ function AIFluxoPanel({ project, activities, aiLogs, currentWeek, onSaveAiLog, o
         mensagem: msg,
         historico: history,
       })
-      setHistory(h => [...h, { role: 'assistant', content: resposta }])
-      onSaveAiLog?.({ week: currentWeek || null, user_question: msg, ai_response: resposta })
+      const ligar = parseLigarDirectives(resposta, activities)
+      const prazo = parsePrazoDirectives(resposta, activities)
+      const cleanText = stripDirectiveLines(resposta)
+      let appliedCount = 0
+      if ((ligar.length || prazo.length) && onApplyDirectives) {
+        const r = await onApplyDirectives(ligar, prazo)
+        appliedCount = r?.applied || 0
+        if (appliedCount) setApplied(a => a + appliedCount)
+      }
+      setHistory(h => [...h, { role: 'assistant', content: cleanText, applied: appliedCount }])
+      onSaveAiLog?.({ week: currentWeek || null, user_question: msg, ai_response: cleanText })
     } catch (err) {
       setError(err.message || 'Erro ao consultar a IA.')
     } finally {
@@ -791,7 +1053,7 @@ function AIFluxoPanel({ project, activities, aiLogs, currentWeek, onSaveAiLog, o
       <div style={{ flex: 1, overflowY: 'auto', padding: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
         {history.length === 0 && (
           <div style={{ fontSize: 13, color: C.gray500 }}>
-            Pergunte, por exemplo: "qual o andamento geral?", "o que está travado?" ou "quais os próximos passos?"
+            Sou um agente ativo: além de responder, conecto etapas soltas e ajusto prazos incoerentes direto na rede. Pergunte algo ou use "Reorganizar tudo" pra eu revisar o fluxograma inteiro.
           </div>
         )}
         {history.map((m, i) => (
@@ -803,17 +1065,28 @@ function AIFluxoPanel({ project, activities, aiLogs, currentWeek, onSaveAiLog, o
             fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap',
           }}>
             {m.content}
+            {m.applied > 0 && (
+              <div style={{ marginTop: 8, padding: '6px 10px', background: 'rgba(255,255,255,0.5)', borderRadius: 6, fontSize: 11, fontWeight: 700, color: C.orange }}>
+                ✓ {m.applied} etapa(s) reorganizada(s) automaticamente no fluxograma
+              </div>
+            )}
           </div>
         ))}
         {loading && <Spinner />}
         {error && <Alert type="error">{error}</Alert>}
       </div>
 
-      <div style={{ padding: 12, borderTop: `1px solid ${C.gray200}`, display: 'flex', gap: 8 }}>
+      <div style={{ padding: '0 12px 8px', fontSize: 10, color: C.gray400 }}>
+        {applied > 0 && `${applied} reorganização(ões) aplicada(s) nesta sessão`}
+      </div>
+      <div style={{ padding: 12, borderTop: `1px solid ${C.gray200}`, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <Btn size="sm" variant="secondary" onClick={() => send('Reorganize completamente o fluxograma: defina a predecessora correta de cada etapa (sequência real de construção) e ajuste as semanas de início/fim de todas para não haver sobreposição ilógica. Gere LIGAR e PRAZO para TODAS as etapas, mesmo as que já estão certas.')} disabled={loading}>🔄 Reorganizar tudo</Btn>
         <Btn size="sm" variant="secondary" onClick={() => send('Qual o andamento geral e o que está travado?')} disabled={loading}>Andamento</Btn>
         <Btn size="sm" variant="secondary" onClick={() => send('Quais os próximos passos recomendados?')} disabled={loading}>Próximos passos</Btn>
-        <Input style={{ flex: 1 }} placeholder="Pergunte à IA..." value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && send()} />
-        <Btn size="sm" icon="send" onClick={() => send()} disabled={loading} />
+        <div style={{ display: 'flex', gap: 8, width: '100%' }}>
+          <Input style={{ flex: 1 }} placeholder="Pergunte à IA..." value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && send()} />
+          <Btn size="sm" icon="send" onClick={() => send()} disabled={loading} />
+        </div>
       </div>
     </div>
   )

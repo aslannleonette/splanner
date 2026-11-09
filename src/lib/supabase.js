@@ -130,6 +130,9 @@ export const upsertMaterial = (data) => {
 export const deleteMaterial = (id) =>
   supabase.from('materials').delete().eq('id', id)
 
+export const updateMaterialStatus = (id, status) =>
+  supabase.from('materials').update({ status }).eq('id', id).select().single()
+
 // ─── MATERIAL MOVEMENTS (log de entrada/saída) ────────────────────────────
 export const fetchMaterialMovements = (materialId) =>
   supabase

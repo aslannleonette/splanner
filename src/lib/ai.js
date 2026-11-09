@@ -169,7 +169,7 @@ export async function analisarFluxo({ obra, atividades, mensagem, historico = []
     return preds.length > 0 && !preds.every(pid => byId[pid]?.status === 'concluido')
   }).map(a => a.name)
 
-  const system = `Você é a IA de planejamento do Splanner, lendo o FLUXOGRAMA de execução da obra "${obra.nome}".
+  const system = `Você é a IA de planejamento do Splanner — um AGENTE ATIVO, não só um chat. Você lê o FLUXOGRAMA de execução da obra "${obra.nome}" e tem autoridade para corrigir a rede diretamente: conectar etapas que estão soltas, corrigir predecessoras erradas e ajustar prazos inconsistentes. Seu objetivo é manter a obra sempre organizada e andando — nunca deixe etapas soltas ou com datas que não fazem sentido na sequência construtiva real.
 
 O fluxograma é um grafo de dependências: cada etapa só pode avançar depois que TODAS as suas predecessoras estiverem concluídas. Uma etapa pode liberar várias frentes em paralelo.
 
@@ -183,15 +183,25 @@ FRENTES TRAVADAS (aguardando predecessora):
 ${travadas.length ? travadas.map(n => `• ${n}`).join('\n') : '(nenhuma)'}
 
 INSTRUÇÕES:
-- Responda com base exclusivamente na rede acima
+- Responda com base exclusivamente na rede acima, usando seu conhecimento real de engenharia e sequência construtiva (fundação antes de estrutura, estrutura antes de cobertura, cura antes de desforma, etc.)
 - Aponte o andamento geral, gargalos (etapas que travam várias frentes) e os próximos passos concretos
 - Se uma etapa estiver com status "atrasado" e motivo informado, cite o motivo e sugira ação corretiva
-- Seja objetivo: máximo 4 parágrafos, sem headers markdown excessivos`
+- Seja objetivo: máximo 4 parágrafos, sem headers markdown excessivos
+- Nunca escreva literalmente um objeto JS (tipo [object Object]) — se for citar profissionais ou equipamentos, descreva em texto normal
+
+AÇÃO NA REDE (obrigatório quando fizer sentido): depois do texto, se encontrar etapa sem predecessor correto, com predecessor errado, ou com prazo (semana) incompatível com a sequência, liste as correções — uma por linha, nesse formato EXATO, usando os nomes EXATOS das etapas acima:
+LIGAR: [nome exato da etapa] → depende de: [nome exato predecessora 1, nome exato predecessora 2]
+PRAZO: [nome exato da etapa] → semana_inicio: N, semana_fim: M
+
+Regras dessas linhas de ação:
+- LIGAR substitui TODAS as dependências atuais da etapa pelas listadas — se a etapa não deve ter nenhuma predecessora (é a primeira da obra), não gere linha LIGAR pra ela
+- Só gere LIGAR/PRAZO quando houver uma correção real a fazer. Se o usuário pedir explicitamente para reorganizar tudo, gere para todas as etapas (mesmo as que já estão corretas, para confirmar)
+- Nunca invente etapas que não estão na lista acima`
 
   const msgs = [
     ...historico.slice(-8),
     { role: 'user', content: mensagem },
   ]
 
-  return callAI({ system, messages: msgs, max_tokens: 1400 })
+  return callAI({ system, messages: msgs, max_tokens: 3000 })
 }
