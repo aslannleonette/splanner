@@ -170,6 +170,7 @@ export default function Flowchart({ projectId, userId, project, activities = [],
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges)
   const [openNode, setOpenNode] = useState(null)
   const [aiOpen, setAiOpen] = useState(false)
+  const [saveError, setSaveError] = useState('')
 
   // Re-sync when upstream activities change (e.g. edited elsewhere) without
   // losing in-flight drag state — simplest safe approach: replace fully.
@@ -190,8 +191,10 @@ export default function Flowchart({ projectId, userId, project, activities = [],
     if (current.includes(source)) return
     const next = [...current, source]
     setEdges(eds => addEdge({ ...params, markerEnd: { type: MarkerType.ArrowClosed, color: C.gray400 }, style: { stroke: '#9CA3AF', strokeWidth: 2 } }, eds))
-    updateActivityFields(target, { predecessor_ids: next }).catch(() => {})
     onActivityPatch?.(target, { predecessor_ids: next })
+    updateActivityFields(target, { predecessor_ids: next })
+      .then(({ error }) => { if (error) setSaveError('Não consegui salvar a dependência: ' + error.message) })
+      .catch(err => setSaveError('Não consegui salvar a dependência: ' + (err?.message || 'erro desconhecido')))
   }, [byId, onActivityPatch, setEdges])
 
   const onEdgesDelete = useCallback((deleted) => {
@@ -199,15 +202,32 @@ export default function Flowchart({ projectId, userId, project, activities = [],
       const targetAct = byId[e.target]
       if (!targetAct) return
       const next = (targetAct.predecessor_ids || []).filter(id => id !== e.source)
-      updateActivityFields(e.target, { predecessor_ids: next }).catch(() => {})
       onActivityPatch?.(e.target, { predecessor_ids: next })
+      updateActivityFields(e.target, { predecessor_ids: next })
+        .then(({ error }) => { if (error) setSaveError('Não consegui remover a dependência: ' + error.message) })
+        .catch(err => setSaveError('Não consegui remover a dependência: ' + (err?.message || 'erro desconhecido')))
     })
   }, [byId, onActivityPatch])
 
   const onNodeDragStop = useCallback((evt, node) => {
-    updateActivityFields(node.id, { flow_x: node.position.x, flow_y: node.position.y }).catch(() => {})
-    onActivityPatch?.(node.id, { flow_x: node.position.x, flow_y: node.position.y })
+    const flow_x = node.position.x, flow_y = node.position.y
+    onActivityPatch?.(node.id, { flow_x, flow_y })
+    updateActivityFields(node.id, { flow_x, flow_y })
+      .then(({ error }) => { if (error) setSaveError('Não consegui salvar a posição: ' + error.message) })
+      .catch(err => setSaveError('Não consegui salvar a posição: ' + (err?.message || 'erro desconhecido')))
   }, [onActivityPatch])
+
+  // Duplo clique num nó cancela (remove) os vínculos de dependência dele
+  const onNodeDoubleClick = useCallback((evt, node) => {
+    const act = byId[node.id]
+    if (!act || !(act.predecessor_ids || []).length) return
+    if (!confirm(`Remover todas as dependências de "${act.name}"? As setas que chegam nela serão apagadas.`)) return
+    setEdges(eds => eds.filter(e => e.target !== node.id))
+    onActivityPatch?.(node.id, { predecessor_ids: [] })
+    updateActivityFields(node.id, { predecessor_ids: [] })
+      .then(({ error }) => { if (error) setSaveError('Não consegui remover a dependência: ' + error.message) })
+      .catch(err => setSaveError('Não consegui remover a dependência: ' + (err?.message || 'erro desconhecido')))
+  }, [byId, onActivityPatch, setEdges])
 
   async function handleAddStage() {
     const maxY = activities.reduce((m, a) => Math.max(m, a.flow_y ?? 0), 0)
@@ -246,11 +266,13 @@ export default function Flowchart({ projectId, userId, project, activities = [],
           onConnect={onConnect}
           onEdgesDelete={onEdgesDelete}
           onNodeDragStop={onNodeDragStop}
+          onNodeDoubleClick={onNodeDoubleClick}
           deleteKeyCode={['Backspace', 'Delete']}
           fitView
           minZoom={0.1}
           maxZoom={2.5}
-          panOnScroll
+          zoomOnScroll
+          panOnScroll={false}
           selectionOnDrag
         >
           <Background color={C.gray200} gap={24} />
@@ -260,8 +282,13 @@ export default function Flowchart({ projectId, userId, project, activities = [],
       </ReactFlowProvider>
 
       {/* Toolbar */}
-      <div style={{ position: 'absolute', top: 12, left: 12, display: 'flex', gap: 8, zIndex: 10 }}>
+      <div style={{ position: 'absolute', top: 12, left: 12, display: 'flex', flexDirection: 'column', gap: 8, zIndex: 10, maxWidth: 320 }}>
         <Btn size="sm" icon="plus" onClick={handleAddStage}>Nova etapa</Btn>
+        {saveError && (
+          <div onClick={() => setSaveError('')} style={{ cursor: 'pointer' }}>
+            <Alert type="error">{saveError}</Alert>
+          </div>
+        )}
       </div>
       <div style={{ position: 'absolute', top: 12, right: 12, zIndex: 10, maxWidth: 280 }}>
         <div style={{
@@ -515,7 +542,7 @@ function EquipeTab({ activity, onPatch }) {
       {workers.map((w, i) => (
         <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', background: C.gray50, borderRadius: 6 }}>
           <Icon name="users" size={14} color={C.gray500} />
-          <div style={{ flex: 1, fontSize: 13 }}>{w.qty}x {w.role}</div>
+          <div style={{ flex: 1, fontSize: 13, color: C.black }}>{w.qty}x {w.role}</div>
           <button onClick={() => removeRow(i)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.red }}>
             <Icon name="x" size={14} />
           </button>
@@ -538,6 +565,7 @@ function MateriaisTab({ activity, materials, projectId }) {
   const [name, setName] = useState('')
   const [qtd, setQtd] = useState('')
   const [unit, setUnit] = useState('un')
+  const [responsavel, setResponsavel] = useState('')
   const [adding, setAdding] = useState(false)
 
   async function addMaterial() {
@@ -552,9 +580,10 @@ function MateriaisTab({ activity, materials, projectId }) {
         unit,
         status: 'pendente',
         week: activity.week_start,
+        responsible_name: responsavel.trim() || null,
       })
       if (data) setList(l => [...l, data])
-      setName(''); setQtd('')
+      setName(''); setQtd(''); setResponsavel('')
     } finally {
       setAdding(false)
     }
@@ -571,7 +600,7 @@ function MateriaisTab({ activity, materials, projectId }) {
       {list.map(m => (
         <div key={m.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', background: C.gray50, borderRadius: 6 }}>
           <Icon name="package" size={14} color={C.gray500} />
-          <div style={{ flex: 1, fontSize: 13 }}>{m.name} — {m.quantity} {m.unit}</div>
+          <div style={{ flex: 1, fontSize: 13, color: C.black }}>{m.name} — {m.quantity} {m.unit}{m.responsible_name ? ` · Resp.: ${m.responsible_name}` : ''}</div>
           <Badge label={m.status} bg={C.gray100} cor={C.gray700} />
           <button onClick={() => removeMaterial(m.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.red }}>
             <Icon name="x" size={14} />
@@ -585,6 +614,7 @@ function MateriaisTab({ activity, materials, projectId }) {
           {['un', 'kg', 'sc', 'm³', 'm²', 'm', 'vb'].map(u => <option key={u} value={u}>{u}</option>)}
         </Select>
       </div>
+      <Input placeholder="Responsável pelo material" value={responsavel} onChange={e => setResponsavel(e.target.value)} />
       <Btn size="sm" icon="plus" onClick={addMaterial} disabled={adding}>Adicionar material</Btn>
     </div>
   )
@@ -635,7 +665,7 @@ function DocsTab({ activity, projectId, userId }) {
         <div key={d.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', background: C.gray50, borderRadius: 6 }}>
           <Icon name="file" size={14} color={C.gray500} />
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{d.doc_name} — Rev.{String(d.revision).padStart(2, '0')}</div>
+            <div style={{ fontSize: 13, color: C.black, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{d.doc_name} — Rev.{String(d.revision).padStart(2, '0')}</div>
             <div style={{ fontSize: 10, color: C.gray400 }}>{d.discipline}</div>
           </div>
           <button onClick={() => handleOpen(d)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.gray500 }}>
@@ -688,7 +718,7 @@ function RelatorioTab({ activity, projectId }) {
       {all && linked.map(r => (
         <div key={r.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', background: C.gray50, borderRadius: 6 }}>
           <Icon name="file" size={14} color={C.gray500} />
-          <div style={{ flex: 1, fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.name || r.file_name}</div>
+          <div style={{ flex: 1, fontSize: 13, color: C.black, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.name || r.file_name}</div>
           <button onClick={() => unlink(r.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.red }}>
             <Icon name="x" size={14} />
           </button>
