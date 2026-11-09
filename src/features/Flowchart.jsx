@@ -1,0 +1,790 @@
+import { useState, useMemo, useCallback, useRef, useEffect } from 'react'
+import ReactFlow, {
+  Background,
+  Controls,
+  MiniMap,
+  Handle,
+  Position,
+  MarkerType,
+  useNodesState,
+  useEdgesState,
+  addEdge,
+  ReactFlowProvider,
+} from 'reactflow'
+import 'reactflow/dist/style.css'
+
+import { C, FONT_BODY, FONT_DISPLAY } from '../tokens'
+import { Btn, Badge, Icon, Modal, Input, Select, Textarea, ProgressBar, Spinner, Alert, Empty, Label } from '../components/ui'
+import {
+  updateActivityFields,
+  createActivity,
+  deleteActivity,
+  fetchActivityDocs,
+  uploadActivityDoc,
+  getActivityDocUrl,
+  deleteActivityDoc,
+  upsertMaterial,
+  deleteMaterial,
+  fetchReports,
+  linkReportToActivity,
+  unlinkReportFromActivity,
+} from '../lib/supabase'
+import { analisarFluxo } from '../lib/ai'
+
+const STATUS_OPTIONS = [
+  { value: 'nao_iniciado', label: 'Não iniciado' },
+  { value: 'em_andamento', label: 'Em andamento' },
+  { value: 'concluido',    label: 'Concluído'    },
+  { value: 'atrasado',     label: 'Atrasado / Parado' },
+]
+const STATUS_COLORS = {
+  nao_iniciado: { bg: C.gray100,    cor: C.gray500 },
+  em_andamento: { bg: C.amberLight, cor: C.amber   },
+  concluido:    { bg: C.greenLight, cor: C.green   },
+  atrasado:     { bg: C.redLight,   cor: C.red     },
+}
+const GROUP_PALETTE = ['#E8500A', '#2563EB', '#16A34A', '#D97706', '#7C3AED', '#0D9488', '#DB2777', '#4B5563']
+
+function groupColor(name = '') {
+  let h = 0
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0
+  return GROUP_PALETTE[h % GROUP_PALETTE.length]
+}
+
+// ─── Auto layout (topological levels) — only for nodes with no saved position ──
+const COL_W = 240
+const ROW_H = 150
+
+function layout(activities) {
+  const byId = Object.fromEntries(activities.map(a => [a.id, a]))
+  const level = {}
+  function calcLevel(a, seen) {
+    if (level[a.id] != null) return level[a.id]
+    if (seen.has(a.id)) return (level[a.id] = 0)
+    seen.add(a.id)
+    const preds = (a.predecessor_ids || []).map(id => byId[id]).filter(Boolean)
+    const lvl = preds.length ? 1 + Math.max(...preds.map(p => calcLevel(p, seen))) : 0
+    level[a.id] = lvl
+    return lvl
+  }
+  activities.forEach(a => calcLevel(a, new Set()))
+
+  const countPerLevel = {}
+  const pos = {}
+  activities.forEach(a => {
+    if (a.flow_x != null && a.flow_y != null) {
+      pos[a.id] = { x: Number(a.flow_x), y: Number(a.flow_y) }
+      return
+    }
+    const lvl = level[a.id] || 0
+    const idx = countPerLevel[lvl] || 0
+    countPerLevel[lvl] = idx + 1
+    pos[a.id] = { x: idx * COL_W, y: lvl * ROW_H }
+  })
+  return pos
+}
+
+// ─── Node card ──────────────────────────────────────────────────────────────
+function ActivityNode({ data }) {
+  const a = data.activity
+  const sc = STATUS_COLORS[a.status] || STATUS_COLORS.nao_iniciado
+  const gcolor = groupColor(a.group_name || 'Geral')
+  return (
+    <div
+      onClick={() => data.onOpen(a)}
+      style={{
+        width: 210,
+        background: C.white,
+        borderRadius: 10,
+        border: `1.5px solid ${C.gray200}`,
+        borderLeft: `5px solid ${gcolor}`,
+        boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
+        padding: '10px 12px',
+        fontFamily: FONT_BODY,
+        cursor: 'pointer',
+      }}
+      title="Clique para abrir os detalhes da etapa"
+    >
+      <Handle type="target" position={Position.Top} style={{ background: C.gray400, width: 8, height: 8 }} />
+      <div style={{
+        fontSize: 9, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase',
+        color: gcolor, marginBottom: 3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+      }}>
+        {a.group_name || 'Geral'}
+      </div>
+      <div style={{
+        fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 14, color: C.black,
+        lineHeight: 1.2, marginBottom: 8,
+      }}>
+        {a.name || '(sem nome)'}
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+        <Badge label={STATUS_OPTIONS.find(s => s.value === a.status)?.label || a.status} cor={sc.cor} bg={sc.bg} />
+        {a.status === 'atrasado' && (
+          <Icon name="warning" size={14} color={C.red} />
+        )}
+      </div>
+      <ProgressBar pct={a.pct || 0} color={sc.cor === C.gray500 ? C.gray300 : sc.cor} height={5} />
+      <div style={{ fontSize: 10, color: C.gray400, marginTop: 4 }}>
+        S{a.week_start}–S{a.week_end} · {a.pct || 0}%
+      </div>
+      <Handle type="source" position={Position.Bottom} style={{ background: C.gray400, width: 8, height: 8 }} />
+    </div>
+  )
+}
+
+const nodeTypes = { activityNode: ActivityNode }
+
+// ─── Main component ─────────────────────────────────────────────────────────
+export default function Flowchart({ projectId, userId, project, activities = [], materials = [], currentWeek, aiLogs = [], onActivityPatch, onActivityCreated, onActivityDeleted, onSaveAiLog }) {
+  const positions = useMemo(() => layout(activities), [activities])
+
+  const initialNodes = useMemo(() => activities.map(a => ({
+    id: a.id,
+    type: 'activityNode',
+    position: positions[a.id] || { x: 0, y: 0 },
+    data: { activity: a, onOpen: (act) => setOpenNode(act) },
+  })), [activities, positions]) // eslint-disable-line
+
+  const byId = useMemo(() => Object.fromEntries(activities.map(a => [a.id, a])), [activities])
+
+  const initialEdges = useMemo(() => {
+    const out = []
+    activities.forEach(a => {
+      ;(a.predecessor_ids || []).forEach(pid => {
+        if (!byId[pid]) return
+        const dashed = a.status === 'atrasado'
+        out.push({
+          id: `${pid}->${a.id}`,
+          source: pid,
+          target: a.id,
+          markerEnd: { type: MarkerType.ArrowClosed, color: dashed ? C.red : C.gray400 },
+          style: { stroke: dashed ? C.red : (a.status === 'concluido' ? C.green : '#9CA3AF'), strokeWidth: 2, strokeDasharray: dashed ? '5 4' : undefined },
+        })
+      })
+    })
+    return out
+  }, [activities, byId])
+
+  const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes)
+  const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges)
+  const [openNode, setOpenNode] = useState(null)
+  const [aiOpen, setAiOpen] = useState(false)
+
+  // Re-sync when upstream activities change (e.g. edited elsewhere) without
+  // losing in-flight drag state — simplest safe approach: replace fully.
+  const lastActIds = useRef('')
+  const sig = activities.map(a => `${a.id}:${a.name}:${a.status}:${a.pct}:${a.flow_x}:${a.flow_y}:${(a.predecessor_ids || []).join(',')}`).join('|')
+  if (sig !== lastActIds.current) {
+    lastActIds.current = sig
+    setNodes(initialNodes)
+    setEdges(initialEdges)
+  }
+
+  const onConnect = useCallback((params) => {
+    const { source, target } = params
+    if (!source || !target || source === target) return
+    const targetAct = byId[target]
+    if (!targetAct) return
+    const current = targetAct.predecessor_ids || []
+    if (current.includes(source)) return
+    const next = [...current, source]
+    setEdges(eds => addEdge({ ...params, markerEnd: { type: MarkerType.ArrowClosed, color: C.gray400 }, style: { stroke: '#9CA3AF', strokeWidth: 2 } }, eds))
+    updateActivityFields(target, { predecessor_ids: next }).catch(() => {})
+    onActivityPatch?.(target, { predecessor_ids: next })
+  }, [byId, onActivityPatch, setEdges])
+
+  const onEdgesDelete = useCallback((deleted) => {
+    deleted.forEach(e => {
+      const targetAct = byId[e.target]
+      if (!targetAct) return
+      const next = (targetAct.predecessor_ids || []).filter(id => id !== e.source)
+      updateActivityFields(e.target, { predecessor_ids: next }).catch(() => {})
+      onActivityPatch?.(e.target, { predecessor_ids: next })
+    })
+  }, [byId, onActivityPatch])
+
+  const onNodeDragStop = useCallback((evt, node) => {
+    updateActivityFields(node.id, { flow_x: node.position.x, flow_y: node.position.y }).catch(() => {})
+    onActivityPatch?.(node.id, { flow_x: node.position.x, flow_y: node.position.y })
+  }, [onActivityPatch])
+
+  async function handleAddStage() {
+    const maxY = activities.reduce((m, a) => Math.max(m, a.flow_y ?? 0), 0)
+    const row = {
+      project_id: projectId,
+      name: 'Nova etapa',
+      group_name: 'Geral',
+      week_start: currentWeek || 1,
+      week_end: currentWeek || 1,
+      tipo: 'exec',
+      pct: 0,
+      status: 'nao_iniciado',
+      order_index: activities.length,
+      predecessor_ids: [],
+      flow_x: 0,
+      flow_y: maxY + ROW_H,
+    }
+    const { data, error } = await createActivity(row)
+    if (!error && data) {
+      onActivityCreated?.(data)
+      setOpenNode(data)
+    }
+  }
+
+  const isMobile = typeof window !== 'undefined' && window.innerWidth < 768
+
+  return (
+    <div style={{ position: 'relative', height: 'calc(100vh - 230px)', minHeight: 480, background: C.white, borderRadius: 10, border: `1px solid ${C.gray200}`, overflow: 'hidden' }}>
+      <ReactFlowProvider>
+        <ReactFlow
+          nodes={nodes}
+          edges={edges}
+          nodeTypes={nodeTypes}
+          onNodesChange={onNodesChange}
+          onEdgesChange={onEdgesChange}
+          onConnect={onConnect}
+          onEdgesDelete={onEdgesDelete}
+          onNodeDragStop={onNodeDragStop}
+          deleteKeyCode={['Backspace', 'Delete']}
+          fitView
+          minZoom={0.1}
+          maxZoom={2.5}
+          panOnScroll
+          selectionOnDrag
+        >
+          <Background color={C.gray200} gap={24} />
+          <Controls showInteractive={false} />
+          {!isMobile && <MiniMap pannable zoomable style={{ background: C.gray50 }} />}
+        </ReactFlow>
+      </ReactFlowProvider>
+
+      {/* Toolbar */}
+      <div style={{ position: 'absolute', top: 12, left: 12, display: 'flex', gap: 8, zIndex: 10 }}>
+        <Btn size="sm" icon="plus" onClick={handleAddStage}>Nova etapa</Btn>
+      </div>
+      <div style={{ position: 'absolute', top: 12, right: 12, zIndex: 10, maxWidth: 280 }}>
+        <div style={{
+          background: 'rgba(255,255,255,0.92)', border: `1px solid ${C.gray200}`, borderRadius: 8,
+          padding: '6px 10px', fontSize: 11, color: C.gray500, lineHeight: 1.4,
+        }}>
+          Arraste de um card para outro para criar dependência. Selecione uma seta e aperte Delete para remover.
+        </div>
+      </div>
+
+      {/* Floating AI button */}
+      <button
+        onClick={() => setAiOpen(true)}
+        title="IA do fluxograma"
+        style={{
+          position: 'absolute', bottom: isMobile ? 24 : 20, right: 20, zIndex: 10,
+          width: 52, height: 52, borderRadius: '50%', background: C.orange, border: 'none', cursor: 'pointer',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          boxShadow: '0 4px 16px rgba(232,80,10,0.45)',
+        }}
+      >
+        <Icon name="chat" size={22} color={C.white} />
+      </button>
+
+      {openNode && (
+        <NodeDetail
+          key={openNode.id}
+          activity={byId[openNode.id] || openNode}
+          allActivities={activities}
+          materials={materials}
+          projectId={projectId}
+          userId={userId}
+          onClose={() => setOpenNode(null)}
+          onPatch={(patch) => onActivityPatch?.(openNode.id, patch)}
+          onDelete={async () => {
+            if (!confirm(`Excluir a etapa "${openNode.name}"? As setas que dependem dela também serão removidas.`)) return
+            await deleteActivity(openNode.id)
+            onActivityDeleted?.(openNode.id)
+            setOpenNode(null)
+          }}
+        />
+      )}
+
+      {aiOpen && (
+        <AIFluxoPanel
+          project={project}
+          activities={activities}
+          aiLogs={aiLogs}
+          currentWeek={currentWeek}
+          onSaveAiLog={onSaveAiLog}
+          onClose={() => setAiOpen(false)}
+        />
+      )}
+    </div>
+  )
+}
+
+// ─── Node detail — "pasta" da etapa ────────────────────────────────────────
+const DETAIL_TABS = [
+  { key: 'geral',   label: 'Visão geral', icon: 'file'    },
+  { key: 'equipe',  label: 'Equipe',      icon: 'users'   },
+  { key: 'mat',     label: 'Materiais',   icon: 'package' },
+  { key: 'docs',    label: 'Plantas',     icon: 'copy'    },
+  { key: 'rel',     label: 'Relatório',   icon: 'chart'   },
+]
+
+function NodeDetail({ activity, allActivities, materials, projectId, userId, onClose, onPatch, onDelete }) {
+  const [tab, setTab] = useState('geral')
+  const [form, setForm] = useState({
+    name: activity.name || '',
+    group_name: activity.group_name || 'Geral',
+    status: activity.status || 'nao_iniciado',
+    pct: activity.pct ?? 0,
+    week_start: activity.week_start ?? 1,
+    week_end: activity.week_end ?? 1,
+    observacoes: activity.observacoes || '',
+  })
+  const [saving, setSaving] = useState(false)
+  const [savedMsg, setSavedMsg] = useState('')
+
+  async function handleSaveGeral() {
+    setSaving(true)
+    try {
+      const patch = {
+        name: form.name.trim() || activity.name,
+        group_name: form.group_name.trim() || 'Geral',
+        status: form.status,
+        pct: Number(form.pct) || 0,
+        week_start: Number(form.week_start) || 1,
+        week_end: Number(form.week_end) || 1,
+        observacoes: form.observacoes || null,
+      }
+      if (patch.status === 'concluido') patch.pct = 100
+      const { error } = await updateActivityFields(activity.id, patch)
+      if (!error) {
+        onPatch(patch)
+        setSavedMsg('Salvo')
+        setTimeout(() => setSavedMsg(''), 1800)
+      }
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const preds = (activity.predecessor_ids || []).map(id => allActivities.find(a => a.id === id)).filter(Boolean)
+  const dependents = allActivities.filter(a => (a.predecessor_ids || []).includes(activity.id))
+
+  return (
+    <div style={{
+      position: 'absolute', top: 0, right: 0, bottom: 0,
+      width: 'min(440px, 100%)', background: C.white, zIndex: 20,
+      borderLeft: `1px solid ${C.gray200}`, boxShadow: '-6px 0 24px rgba(0,0,0,0.12)',
+      display: 'flex', flexDirection: 'column', fontFamily: FONT_BODY,
+    }}>
+      {/* Header */}
+      <div style={{ padding: '14px 16px', borderBottom: `1px solid ${C.gray200}`, display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8 }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 10, color: C.gray400, letterSpacing: '0.06em', textTransform: 'uppercase' }}>Etapa</div>
+          <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 800, fontSize: 17, color: C.black, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            {activity.name}
+          </div>
+        </div>
+        <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.gray500, padding: 4 }}>
+          <Icon name="x" size={18} />
+        </button>
+      </div>
+
+      {/* Mini tabs */}
+      <div style={{ display: 'flex', overflowX: 'auto', borderBottom: `1px solid ${C.gray200}` }}>
+        {DETAIL_TABS.map(t => (
+          <button key={t.key} onClick={() => setTab(t.key)} style={{
+            display: 'flex', alignItems: 'center', gap: 5, padding: '9px 12px', border: 'none', background: 'none',
+            cursor: 'pointer', fontSize: 11, fontWeight: 700, whiteSpace: 'nowrap',
+            color: tab === t.key ? C.orange : C.gray500,
+            borderBottom: `2px solid ${tab === t.key ? C.orange : 'transparent'}`,
+          }}>
+            <Icon name={t.icon} size={12} color={tab === t.key ? C.orange : C.gray500} />
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ flex: 1, overflowY: 'auto', padding: 16 }}>
+        {tab === 'geral' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+            <div>
+              <Label>Nome da etapa</Label>
+              <Input value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} />
+            </div>
+            <div>
+              <Label>Grupo</Label>
+              <Input value={form.group_name} onChange={e => setForm(f => ({ ...f, group_name: e.target.value }))} />
+            </div>
+            <div style={{ display: 'flex', gap: 10 }}>
+              <div style={{ flex: 1 }}>
+                <Label>Status</Label>
+                <Select value={form.status} onChange={e => setForm(f => ({ ...f, status: e.target.value }))}>
+                  {STATUS_OPTIONS.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
+                </Select>
+              </div>
+              <div style={{ width: 90 }}>
+                <Label>% avanço</Label>
+                <Input type="number" min={0} max={100} value={form.pct} onChange={e => setForm(f => ({ ...f, pct: e.target.value }))} />
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 10 }}>
+              <div style={{ flex: 1 }}>
+                <Label>Semana início</Label>
+                <Input type="number" min={1} value={form.week_start} onChange={e => setForm(f => ({ ...f, week_start: e.target.value }))} />
+              </div>
+              <div style={{ flex: 1 }}>
+                <Label>Semana fim</Label>
+                <Input type="number" min={1} value={form.week_end} onChange={e => setForm(f => ({ ...f, week_end: e.target.value }))} />
+              </div>
+            </div>
+            <div>
+              <Label>{form.status === 'atrasado' ? 'Motivo da parada' : 'Observação'}</Label>
+              <Textarea
+                rows={3}
+                placeholder={form.status === 'atrasado' ? '⚠ Por que essa etapa parou?' : 'Observação...'}
+                value={form.observacoes}
+                onChange={e => setForm(f => ({ ...f, observacoes: e.target.value }))}
+                style={form.status === 'atrasado' ? { borderColor: C.red, background: C.redLight } : {}}
+              />
+            </div>
+
+            {preds.length > 0 && (
+              <div>
+                <Label>Depende de</Label>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  {preds.map(p => <Badge key={p.id} label={p.name} bg={C.gray100} cor={C.gray700} />)}
+                </div>
+              </div>
+            )}
+            {dependents.length > 0 && (
+              <div>
+                <Label>Libera</Label>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  {dependents.map(d => <Badge key={d.id} label={d.name} bg={C.orangeLight} cor={C.orange} />)}
+                </div>
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+              <Btn icon={saving ? undefined : 'check'} onClick={handleSaveGeral} disabled={saving} style={{ flex: 1, justifyContent: 'center' }}>
+                {saving ? 'Salvando...' : (savedMsg || 'Salvar')}
+              </Btn>
+              <Btn variant="danger" icon="trash" onClick={onDelete} />
+            </div>
+          </div>
+        )}
+
+        {tab === 'equipe' && <EquipeTab activity={activity} onPatch={onPatch} />}
+        {tab === 'mat' && <MateriaisTab activity={activity} materials={materials} projectId={projectId} />}
+        {tab === 'docs' && <DocsTab activity={activity} projectId={projectId} userId={userId} />}
+        {tab === 'rel' && <RelatorioTab activity={activity} projectId={projectId} />}
+      </div>
+    </div>
+  )
+}
+
+// ─── Equipe (atores envolvidos) ─────────────────────────────────────────────
+function EquipeTab({ activity, onPatch }) {
+  const [workers, setWorkers] = useState(activity.workers && activity.workers.length ? activity.workers : [])
+  const [role, setRole] = useState('')
+  const [qty, setQty] = useState(1)
+  const [saving, setSaving] = useState(false)
+
+  function addRow() {
+    if (!role.trim()) return
+    setWorkers(w => [...w, { role: role.trim(), qty: Number(qty) || 1 }])
+    setRole(''); setQty(1)
+  }
+  function removeRow(i) {
+    setWorkers(w => w.filter((_, idx) => idx !== i))
+  }
+  async function save() {
+    setSaving(true)
+    try {
+      await updateActivityFields(activity.id, { workers })
+      onPatch({ workers })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ fontSize: 12, color: C.gray500 }}>Atores envolvidos nesta etapa (mão de obra / equipe responsável).</div>
+      {workers.length === 0 && <Empty icon="users" text="Nenhum profissional cadastrado" />}
+      {workers.map((w, i) => (
+        <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', background: C.gray50, borderRadius: 6 }}>
+          <Icon name="users" size={14} color={C.gray500} />
+          <div style={{ flex: 1, fontSize: 13 }}>{w.qty}x {w.role}</div>
+          <button onClick={() => removeRow(i)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.red }}>
+            <Icon name="x" size={14} />
+          </button>
+        </div>
+      ))}
+      <div style={{ display: 'flex', gap: 6 }}>
+        <Input style={{ width: 56 }} type="number" min={1} value={qty} onChange={e => setQty(e.target.value)} />
+        <Input style={{ flex: 1 }} placeholder="Função (ex: pedreiro)" value={role} onChange={e => setRole(e.target.value)} onKeyDown={e => e.key === 'Enter' && addRow()} />
+        <Btn size="sm" icon="plus" variant="secondary" onClick={addRow} />
+      </div>
+      <Btn icon="check" onClick={save} disabled={saving}>{saving ? 'Salvando...' : 'Salvar equipe'}</Btn>
+    </div>
+  )
+}
+
+// ─── Materiais da etapa ──────────────────────────────────────────────────────
+function MateriaisTab({ activity, materials, projectId }) {
+  const mine = materials.filter(m => m.activity_id === activity.id)
+  const [list, setList] = useState(mine)
+  const [name, setName] = useState('')
+  const [qtd, setQtd] = useState('')
+  const [unit, setUnit] = useState('un')
+  const [adding, setAdding] = useState(false)
+
+  async function addMaterial() {
+    if (!name.trim()) return
+    setAdding(true)
+    try {
+      const { data } = await upsertMaterial({
+        project_id: projectId,
+        activity_id: activity.id,
+        name: name.trim(),
+        quantity: Number(qtd) || 0,
+        unit,
+        status: 'pendente',
+        week: activity.week_start,
+      })
+      if (data) setList(l => [...l, data])
+      setName(''); setQtd('')
+    } finally {
+      setAdding(false)
+    }
+  }
+  async function removeMaterial(id) {
+    await deleteMaterial(id)
+    setList(l => l.filter(m => m.id !== id))
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ fontSize: 12, color: C.gray500 }}>Materiais previstos/usados nesta etapa.</div>
+      {list.length === 0 && <Empty icon="package" text="Nenhum material vinculado" />}
+      {list.map(m => (
+        <div key={m.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', background: C.gray50, borderRadius: 6 }}>
+          <Icon name="package" size={14} color={C.gray500} />
+          <div style={{ flex: 1, fontSize: 13 }}>{m.name} — {m.quantity} {m.unit}</div>
+          <Badge label={m.status} bg={C.gray100} cor={C.gray700} />
+          <button onClick={() => removeMaterial(m.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.red }}>
+            <Icon name="x" size={14} />
+          </button>
+        </div>
+      ))}
+      <div style={{ display: 'flex', gap: 6 }}>
+        <Input style={{ flex: 1 }} placeholder="Material" value={name} onChange={e => setName(e.target.value)} />
+        <Input style={{ width: 60 }} placeholder="Qtd" value={qtd} onChange={e => setQtd(e.target.value)} />
+        <Select style={{ width: 70 }} value={unit} onChange={e => setUnit(e.target.value)}>
+          {['un', 'kg', 'sc', 'm³', 'm²', 'm', 'vb'].map(u => <option key={u} value={u}>{u}</option>)}
+        </Select>
+      </div>
+      <Btn size="sm" icon="plus" onClick={addMaterial} disabled={adding}>Adicionar material</Btn>
+    </div>
+  )
+}
+
+// ─── Plantas / documentos ────────────────────────────────────────────────────
+function DocsTab({ activity, projectId, userId }) {
+  const [docs, setDocs] = useState(null)
+  const [discipline, setDiscipline] = useState('Geral')
+  const [docName, setDocName] = useState('')
+  const [uploading, setUploading] = useState(false)
+  const fileRef = useRef(null)
+
+  useEffect(() => { load() }, []) // eslint-disable-line
+  async function load() {
+    const { data } = await fetchActivityDocs(activity.id)
+    setDocs(data || [])
+  }
+
+  async function handleFile(e) {
+    const file = e.target.files?.[0]
+    if (!file || !docName.trim()) return
+    setUploading(true)
+    try {
+      const { data } = await uploadActivityDoc({ activityId: activity.id, projectId, userId, file, discipline, docName: docName.trim() })
+      if (data) setDocs(d => [data, ...(d || [])])
+      setDocName('')
+      if (fileRef.current) fileRef.current.value = ''
+    } finally {
+      setUploading(false)
+    }
+  }
+  async function handleOpen(doc) {
+    const { data } = await getActivityDocUrl(doc.storage_path)
+    if (data?.signedUrl) window.open(data.signedUrl, '_blank')
+  }
+  async function handleDelete(doc) {
+    await deleteActivityDoc({ id: doc.id, storagePath: doc.storage_path })
+    setDocs(d => d.filter(x => x.id !== doc.id))
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ fontSize: 12, color: C.gray500 }}>Plantas e documentos técnicos desta etapa.</div>
+      {docs === null && <Spinner />}
+      {docs && docs.length === 0 && <Empty icon="copy" text="Nenhum documento enviado" />}
+      {docs && docs.map(d => (
+        <div key={d.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', background: C.gray50, borderRadius: 6 }}>
+          <Icon name="file" size={14} color={C.gray500} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{d.doc_name} — Rev.{String(d.revision).padStart(2, '0')}</div>
+            <div style={{ fontSize: 10, color: C.gray400 }}>{d.discipline}</div>
+          </div>
+          <button onClick={() => handleOpen(d)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.gray500 }}>
+            <Icon name="download" size={14} />
+          </button>
+          <button onClick={() => handleDelete(d)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.red }}>
+            <Icon name="x" size={14} />
+          </button>
+        </div>
+      ))}
+      <div style={{ display: 'flex', gap: 6 }}>
+        <Input style={{ width: 90 }} placeholder="Disciplina" value={discipline} onChange={e => setDiscipline(e.target.value)} />
+        <Input style={{ flex: 1 }} placeholder="Nome do documento" value={docName} onChange={e => setDocName(e.target.value)} />
+      </div>
+      <Btn size="sm" icon="upload" variant="secondary" disabled={uploading || !docName.trim()} onClick={() => fileRef.current?.click()}>
+        {uploading ? 'Enviando...' : 'Enviar arquivo'}
+      </Btn>
+      <input ref={fileRef} type="file" style={{ display: 'none' }} onChange={handleFile} />
+    </div>
+  )
+}
+
+// ─── Relatório vinculado ─────────────────────────────────────────────────────
+function RelatorioTab({ activity, projectId }) {
+  const [all, setAll] = useState(null)
+
+  useEffect(() => { load() }, []) // eslint-disable-line
+  async function load() {
+    const { data } = await fetchReports(projectId)
+    setAll(data || [])
+  }
+
+  const linked = (all || []).filter(r => r.activity_id === activity.id)
+  const unlinked = (all || []).filter(r => !r.activity_id)
+
+  async function link(id) {
+    await linkReportToActivity(id, activity.id)
+    load()
+  }
+  async function unlink(id) {
+    await unlinkReportFromActivity(id)
+    load()
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ fontSize: 12, color: C.gray500 }}>Relatórios (gerados na aba Relatórios) vinculados a esta etapa.</div>
+      {all === null && <Spinner />}
+      {all && linked.length === 0 && <Empty icon="file" text="Nenhum relatório vinculado" />}
+      {all && linked.map(r => (
+        <div key={r.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', background: C.gray50, borderRadius: 6 }}>
+          <Icon name="file" size={14} color={C.gray500} />
+          <div style={{ flex: 1, fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.name || r.file_name}</div>
+          <button onClick={() => unlink(r.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.red }}>
+            <Icon name="x" size={14} />
+          </button>
+        </div>
+      ))}
+      {all && unlinked.length > 0 && (
+        <div>
+          <Label>Vincular relatório existente</Label>
+          <Select defaultValue="" onChange={e => { if (e.target.value) link(e.target.value) }}>
+            <option value="">Selecione...</option>
+            {unlinked.map(r => <option key={r.id} value={r.id}>{r.name || r.file_name}</option>)}
+          </Select>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── Painel de IA do fluxograma ──────────────────────────────────────────────
+function AIFluxoPanel({ project, activities, aiLogs, currentWeek, onSaveAiLog, onClose }) {
+  const [history, setHistory] = useState(
+    [...aiLogs].slice(0, 6).reverse().flatMap(l => ([
+      { role: 'user', content: l.user_question },
+      { role: 'assistant', content: l.ai_response },
+    ]))
+  )
+  const [input, setInput] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+
+  async function send(message) {
+    const msg = message || input
+    if (!msg.trim() || loading) return
+    setInput('')
+    setError('')
+    setHistory(h => [...h, { role: 'user', content: msg }])
+    setLoading(true)
+    try {
+      const resposta = await analisarFluxo({
+        obra: { nome: project?.name || 'Obra' },
+        atividades: activities,
+        mensagem: msg,
+        historico: history,
+      })
+      setHistory(h => [...h, { role: 'assistant', content: resposta }])
+      onSaveAiLog?.({ week: currentWeek || null, user_question: msg, ai_response: resposta })
+    } catch (err) {
+      setError(err.message || 'Erro ao consultar a IA.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div style={{
+      position: 'absolute', left: 0, right: 0, bottom: 0, zIndex: 30,
+      height: 'min(60%, 480px)', background: C.white, borderTop: `1px solid ${C.gray200}`,
+      boxShadow: '0 -6px 24px rgba(0,0,0,0.15)', display: 'flex', flexDirection: 'column', fontFamily: FONT_BODY,
+    }}>
+      <div style={{ padding: '10px 14px', borderBottom: `1px solid ${C.gray200}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <Icon name="chat" size={16} color={C.orange} />
+          <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 800, fontSize: 14, color: C.black }}>IA DO FLUXOGRAMA</div>
+        </div>
+        <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.gray500 }}>
+          <Icon name="x" size={18} />
+        </button>
+      </div>
+
+      <div style={{ flex: 1, overflowY: 'auto', padding: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {history.length === 0 && (
+          <div style={{ fontSize: 13, color: C.gray500 }}>
+            Pergunte, por exemplo: "qual o andamento geral?", "o que está travado?" ou "quais os próximos passos?"
+          </div>
+        )}
+        {history.map((m, i) => (
+          <div key={i} style={{
+            alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
+            maxWidth: '85%', padding: '8px 12px', borderRadius: 10,
+            background: m.role === 'user' ? C.orange : C.gray100,
+            color: m.role === 'user' ? C.white : C.black,
+            fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap',
+          }}>
+            {m.content}
+          </div>
+        ))}
+        {loading && <Spinner />}
+        {error && <Alert type="error">{error}</Alert>}
+      </div>
+
+      <div style={{ padding: 12, borderTop: `1px solid ${C.gray200}`, display: 'flex', gap: 8 }}>
+        <Btn size="sm" variant="secondary" onClick={() => send('Qual o andamento geral e o que está travado?')} disabled={loading}>Andamento</Btn>
+        <Btn size="sm" variant="secondary" onClick={() => send('Quais os próximos passos recomendados?')} disabled={loading}>Próximos passos</Btn>
+        <Input style={{ flex: 1 }} placeholder="Pergunte à IA..." value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && send()} />
+        <Btn size="sm" icon="send" onClick={() => send()} disabled={loading} />
+      </div>
+    </div>
+  )
+}

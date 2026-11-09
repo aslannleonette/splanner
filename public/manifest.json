@@ -1,0 +1,24 @@
+{
+  "name": "Splanner — Programação de Obras",
+  "short_name": "Splanner",
+  "description": "Gerenciamento de obras e cronograma físico",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#E8500A",
+  "theme_color": "#E8500A",
+  "icons": [
+    {
+      "src": "/logo-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/logo-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
