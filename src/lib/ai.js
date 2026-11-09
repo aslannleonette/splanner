@@ -8,8 +8,19 @@ const EDGE_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ai-chat`
  * system: string com o system prompt
  */
 export async function callAI({ messages, system, max_tokens = 1200 }) {
-  const { data: { session } } = await supabase.auth.getSession()
-  const token = session?.access_token
+  // supabase.auth.getSession() pode travar pra sempre em alguns navegadores
+  // mobile (lock interno do supabase-js) — nunca deixamos isso prender a
+  // chamada à IA; se não resolver rápido, seguimos sem o token do usuário.
+  let token
+  try {
+    const result = await Promise.race([
+      supabase.auth.getSession(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000)),
+    ])
+    token = result?.data?.session?.access_token
+  } catch {
+    token = undefined
+  }
 
   const res = await fetch(EDGE_URL, {
     method: 'POST',
@@ -195,7 +206,8 @@ PRAZO: [nome exato da etapa] → semana_inicio: N, semana_fim: M
 
 Regras dessas linhas de ação:
 - LIGAR substitui TODAS as dependências atuais da etapa pelas listadas — se a etapa não deve ter nenhuma predecessora (é a primeira da obra), não gere linha LIGAR pra ela
-- Só gere LIGAR/PRAZO quando houver uma correção real a fazer. Se o usuário pedir explicitamente para reorganizar tudo, gere para todas as etapas (mesmo as que já estão corretas, para confirmar)
+- Nem toda etapa precisa depender da anterior numa fila única: etapas COMPLEMENTARES/paralelas (ex: elétrico e hidráulico andando juntos depois da alvenaria) devem compartilhar a MESMA predecessora, sem depender uma da outra — isso faz elas aparecerem lado a lado no mesmo nível do fluxo, formando frentes paralelas de verdade, não uma fila única
+- Só gere LIGAR/PRAZO quando houver uma correção real a fazer. Se o usuário pedir explicitamente para reorganizar tudo, gere para todas as etapas (mesmo as que já estão corretas, para confirmar), identificando corretamente quais são sequenciais e quais são paralelas/complementares
 - Nunca invente etapas que não estão na lista acima`
 
   const msgs = [

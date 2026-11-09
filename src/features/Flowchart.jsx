@@ -52,12 +52,14 @@ function groupColor(name = '') {
   return GROUP_PALETTE[h % GROUP_PALETTE.length]
 }
 
-// ─── Auto layout (vertical chain) — only for nodes with no saved position ──
-// O fluxograma é sempre vertical: cada etapa fica numa linha única, uma
-// abaixo da outra, seguindo a ordem de dependência (predecessor_ids).
-// Quando uma etapa não tem predecessor definido, cai no fim da cadeia
-// principal (ordem de order_index), então o fluxo nunca "abre" na horizontal.
+// ─── Auto layout (níveis topológicos) — só para nós sem posição salva ──
+// Os cards são livres: o usuário pode arrastar pra qualquer lugar. Esse
+// layout só serve de ponto de partida (e é o que a IA usa pra reorganizar):
+// cada nível de profundidade (distância da predecessora mais longa) vira uma
+// "linha", e tarefas do mesmo nível (paralelas/complementares) ficam lado a
+// lado na mesma linha, lado a lado, formando um fluxo enquadrado.
 const ROW_H = 210
+const COL_W = 320
 
 function computeLevels(activities) {
   const byId = Object.fromEntries(activities.map(a => [a.id, a]))
@@ -75,16 +77,35 @@ function computeLevels(activities) {
   return level
 }
 
-function layout(activities) {
+// Posição em colunas dentro de cada nível, centralizada (fluxo "enquadrado").
+function computeFramedPositions(activities) {
   const level = computeLevels(activities)
+  const countPerLevel = {}
+  activities.forEach(a => { const l = level[a.id] || 0; countPerLevel[l] = (countPerLevel[l] || 0) + 1 })
+  const maxCount = Math.max(1, ...Object.values(countPerLevel))
+  const totalWidth = maxCount * COL_W
+  const idxPerLevel = {}
+  const pos = {}
+  activities.forEach(a => {
+    const lvl = level[a.id] || 0
+    const idx = idxPerLevel[lvl] || 0
+    idxPerLevel[lvl] = idx + 1
+    const rowWidth = (countPerLevel[lvl] || 1) * COL_W
+    const offset = (totalWidth - rowWidth) / 2
+    pos[a.id] = { x: offset + idx * COL_W, y: lvl * ROW_H }
+  })
+  return pos
+}
+
+function layout(activities) {
+  const framed = computeFramedPositions(activities)
   const pos = {}
   activities.forEach(a => {
     if (a.flow_x != null && a.flow_y != null) {
-      pos[a.id] = { x: 0, y: Number(a.flow_y) }
+      pos[a.id] = { x: Number(a.flow_x), y: Number(a.flow_y) }
       return
     }
-    const lvl = level[a.id] || 0
-    pos[a.id] = { x: 0, y: lvl * ROW_H }
+    pos[a.id] = framed[a.id]
   })
   return pos
 }
@@ -98,9 +119,10 @@ function ActivityNode({ data }) {
   const hasObs = !!(a.observacoes && a.observacoes.trim())
   const matsUrgent = mats.some(m => m.status === 'urgente')
   const matsPendente = mats.some(m => m.status === 'pendente' || m.status === 'pedido')
-  const showAlert = hasObs || mats.some(m => m.status !== 'chegou')
-  const alertColor = matsUrgent ? C.red : (hasObs || matsPendente) ? C.amber : C.gray500
-  const alertBg = matsUrgent ? C.redLight : (hasObs || matsPendente) ? C.amberLight : C.gray100
+  const matsAllOk = mats.length > 0 && mats.every(m => m.status === 'chegou')
+  const showAlert = hasObs || mats.length > 0
+  const alertColor = matsUrgent ? C.red : (hasObs || matsPendente) ? C.amber : matsAllOk ? C.green : C.gray500
+  const alertBg = matsUrgent ? C.redLight : (hasObs || matsPendente) ? C.amberLight : matsAllOk ? C.greenLight : C.gray100
   const hasPredecessor = !!(a.predecessor_ids && a.predecessor_ids.length)
   const hasDependents = !!data.hasDependents
   const HANDLE_SIZE = 24
@@ -180,9 +202,9 @@ function ActivityNode({ data }) {
               padding: '5px 8px', borderRadius: 7, background: alertBg,
             }}
           >
-            <Icon name="warning" size={13} color={alertColor} />
+            <Icon name={matsAllOk && !hasObs ? 'check' : 'warning'} size={13} color={alertColor} />
             <div style={{ fontSize: 11, color: alertColor, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {hasObs ? a.observacoes : `${mats.length} material${mats.length > 1 ? 'is' : ''}${mats.length ? ': ' + mats.map(m => m.name).join(', ') : ''}`}
+              {hasObs ? a.observacoes : matsAllOk ? `✓ Material OK: ${mats.map(m => m.name).join(', ')}` : `${mats.length} material${mats.length > 1 ? 'is' : ''}${mats.length ? ': ' + mats.map(m => m.name).join(', ') : ''}`}
             </div>
           </div>
         )}
@@ -269,6 +291,29 @@ export default function Flowchart({ projectId, userId, project, activities = [],
   const [aiOpen, setAiOpen] = useState(false)
   const [saveError, setSaveError] = useState('')
   const [showHelp, setShowHelp] = useState(false)
+  const [flowInstance, setFlowInstance] = useState(null)
+  const [panel, setPanel] = useState(null) // null | 'search' | 'summary'
+  const [query, setQuery] = useState('')
+
+  function focusActivity(act) {
+    const node = nodes.find(n => n.id === act.id)
+    const pos = node?.position || positions[act.id] || { x: 0, y: 0 }
+    flowInstance?.setCenter(pos.x + 140, pos.y + 90, { zoom: 1.1, duration: 500 })
+    setPanel(null)
+  }
+
+  function handleEtapaAtual() {
+    const emAndamento = activities.filter(a => a.status === 'em_andamento')
+    let alvo = emAndamento[0]
+    if (!alvo && currentWeek) {
+      alvo = activities.find(a => a.status !== 'concluido' && a.week_start <= currentWeek && a.week_end >= currentWeek)
+    }
+    if (!alvo) {
+      setSaveError('Nenhuma etapa em andamento no momento.')
+      return
+    }
+    focusActivity(alvo)
+  }
 
   // Re-sync when upstream activities change (e.g. edited elsewhere) without
   // losing in-flight drag state — simplest safe approach: replace fully.
@@ -309,11 +354,8 @@ export default function Flowchart({ projectId, userId, project, activities = [],
   }, [byId, onActivityPatch])
 
   const onNodeDragStop = useCallback((evt, node) => {
-    // Fluxograma é sempre vertical: trava o X em 0, só a ordem (Y) é livre.
-    const flow_x = 0, flow_y = node.position.y
-    if (node.position.x !== 0) {
-      setNodes(nds => nds.map(n => n.id === node.id ? { ...n, position: { x: 0, y: flow_y } } : n))
-    }
+    // Cards são livres — o usuário posiciona onde quiser.
+    const flow_x = node.position.x, flow_y = node.position.y
     onActivityPatch?.(node.id, { flow_x, flow_y })
     updateActivityFields(node.id, { flow_x, flow_y })
       .then(({ error }) => { if (error) setSaveError('Não consegui salvar a posição: ' + error.message) })
@@ -333,8 +375,11 @@ export default function Flowchart({ projectId, userId, project, activities = [],
   }, [byId, onActivityPatch, setEdges])
 
   // A IA do fluxograma age como agente: aplica diretivas LIGAR/PRAZO que ela
-  // propõe, reorganizando de verdade a rede (dependências + posição vertical)
-  // e persistindo no banco — não é só um chat de texto.
+  // propõe, reorganizando de verdade a rede (dependências + posição) e
+  // persistindo no banco — não é só um chat de texto. O reposicionamento usa
+  // o layout em colunas (computeFramedPositions): cada nível de profundidade
+  // vira uma linha, tarefas paralelas/complementares do mesmo nível ficam
+  // lado a lado, centralizadas — um fluxo organizado e enquadrado.
   const [applyingAi, setApplyingAi] = useState(false)
   async function handleApplyAiDirectives(ligarList, prazoList) {
     if (!ligarList.length && !prazoList.length) return { applied: 0 }
@@ -346,19 +391,19 @@ export default function Flowchart({ projectId, userId, project, activities = [],
       prazoList.forEach(({ id, week_start, week_end }) => {
         if (byId[id]) { byId[id].week_start = week_start; byId[id].week_end = week_end }
       })
-      const levels = computeLevels(working)
+      const framed = computeFramedPositions(working)
       const touchedIds = new Set([...ligarList.map(x => x.id), ...prazoList.map(x => x.id)])
       let applied = 0
       for (const a of working) {
-        const newFlowY = (levels[a.id] || 0) * ROW_H
-        const changed = touchedIds.has(a.id) || Number(a.flow_y) !== newFlowY || Number(a.flow_x) !== 0
+        const newPos = framed[a.id] || { x: 0, y: 0 }
+        const changed = touchedIds.has(a.id) || Number(a.flow_y) !== newPos.y || Number(a.flow_x) !== newPos.x
         if (!changed) continue
         const patch = {
           predecessor_ids: a.predecessor_ids || [],
           week_start: a.week_start,
           week_end: a.week_end,
-          flow_x: 0,
-          flow_y: newFlowY,
+          flow_x: newPos.x,
+          flow_y: newPos.y,
         }
         onActivityPatch?.(a.id, patch)
         const { error } = await updateActivityFields(a.id, patch)
@@ -451,6 +496,7 @@ export default function Flowchart({ projectId, userId, project, activities = [],
           onEdgesDelete={onEdgesDelete}
           onNodeDragStop={onNodeDragStop}
           onNodeDoubleClick={onNodeDoubleClick}
+          onInit={setFlowInstance}
           deleteKeyCode={['Backspace', 'Delete']}
           fitView
           minZoom={0.1}
@@ -460,17 +506,93 @@ export default function Flowchart({ projectId, userId, project, activities = [],
           selectionOnDrag
         >
           <Background color={C.gray200} gap={24} />
-          <Controls showInteractive={false} />
+          <Controls showInteractive={false} showZoom showFitView position="bottom-left" style={{ zIndex: 15 }} />
           {!isMobile && <MiniMap pannable zoomable style={{ background: C.gray50 }} />}
         </ReactFlow>
       </ReactFlowProvider>
 
       {/* Toolbar */}
       <div style={{ position: 'absolute', top: 12, left: 12, display: 'flex', flexDirection: 'column', gap: 8, zIndex: 10, maxWidth: 320 }}>
-        <Btn size="sm" icon="plus" onClick={handleAddStage}>Nova etapa</Btn>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <Btn size="sm" icon="plus" onClick={handleAddStage}>Nova etapa</Btn>
+          <Btn size="sm" icon="mapPin" variant="secondary" onClick={handleEtapaAtual} title="Ir pra etapa em andamento">Etapa atual</Btn>
+          <button
+            onClick={() => setPanel(p => p === 'search' ? null : 'search')}
+            title="Pesquisar etapas"
+            style={{
+              width: 32, height: 32, borderRadius: 7, border: `1px solid ${C.gray200}`,
+              background: panel === 'search' ? C.orangeLight : C.white, cursor: 'pointer',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+            }}
+          >
+            <Icon name="search" size={15} color={panel === 'search' ? C.orange : C.gray700} />
+          </button>
+          <button
+            onClick={() => setPanel(p => p === 'summary' ? null : 'summary')}
+            title="Sumário das etapas"
+            style={{
+              width: 32, height: 32, borderRadius: 7, border: `1px solid ${C.gray200}`,
+              background: panel === 'summary' ? C.orangeLight : C.white, cursor: 'pointer',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+            }}
+          >
+            <Icon name="list" size={15} color={panel === 'summary' ? C.orange : C.gray700} />
+          </button>
+        </div>
         {saveError && (
           <div onClick={() => setSaveError('')} style={{ cursor: 'pointer' }}>
             <Alert type="error">{saveError}</Alert>
+          </div>
+        )}
+        {panel && (
+          <div style={{
+            width: 280, maxHeight: 420, background: C.white, border: `1px solid ${C.gray200}`,
+            borderRadius: 10, boxShadow: '0 6px 20px rgba(0,0,0,0.15)', display: 'flex', flexDirection: 'column',
+            overflow: 'hidden',
+          }}>
+            <div style={{ padding: 10, borderBottom: `1px solid ${C.gray200}` }}>
+              <Input
+                autoFocus={panel === 'search'}
+                placeholder="Buscar etapa ou grupo..."
+                value={query}
+                onChange={e => setQuery(e.target.value)}
+              />
+            </div>
+            <div style={{ overflowY: 'auto', padding: 6 }}>
+              {(() => {
+                const q = query.trim().toLowerCase()
+                const filtered = activities.filter(a =>
+                  !q || a.name.toLowerCase().includes(q) || (a.group_name || '').toLowerCase().includes(q)
+                )
+                if (!filtered.length) return <div style={{ padding: 12, fontSize: 12, color: C.gray500 }}>Nenhuma etapa encontrada.</div>
+                const groups = {}
+                filtered.forEach(a => { (groups[a.group_name || 'Geral'] ||= []).push(a) })
+                return Object.entries(groups).map(([g, items]) => (
+                  <div key={g} style={{ marginBottom: 8 }}>
+                    <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase', color: groupColor(g), padding: '4px 8px' }}>
+                      {g}
+                    </div>
+                    {items.map(a => {
+                      const sc = STATUS_COLORS[a.status] || STATUS_COLORS.nao_iniciado
+                      return (
+                        <button
+                          key={a.id}
+                          onClick={() => focusActivity(a)}
+                          style={{
+                            display: 'flex', alignItems: 'center', gap: 8, width: '100%', textAlign: 'left',
+                            padding: '6px 8px', border: 'none', background: 'none', cursor: 'pointer', borderRadius: 6,
+                          }}
+                        >
+                          <span style={{ width: 8, height: 8, borderRadius: '50%', background: sc.cor, flexShrink: 0 }} />
+                          <span style={{ flex: 1, fontSize: 12, color: C.black, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.name}</span>
+                          <span style={{ fontSize: 10, color: C.gray400, flexShrink: 0 }}>{a.pct || 0}%</span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                ))
+              })()}
+            </div>
           </div>
         )}
       </div>
