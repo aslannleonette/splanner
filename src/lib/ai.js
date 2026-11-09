@@ -1,4 +1,5 @@
 import { supabase } from './supabase'
+import { parseObsList, obsListToText } from './obs'
 
 const EDGE_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ai-chat`
 
@@ -97,7 +98,8 @@ export async function analisarRdo({ obra, atividades, semanaAtual, mensagem, his
     const workers   = (a.workers   || []).length > 0 ? ` | Profissionais: ${(a.workers || []).map(w => `${w.qty}x ${w.role}`).join(', ')}` : ''
     const equipment = (a.equipment || []).length > 0 ? ` | Equipamentos: ${(a.equipment || []).map(e => typeof e === 'string' ? e : (e.qty > 1 ? `${e.qty}x ${e.name}` : e.name)).join(', ')}` : ''
     const grupo     = a.group_name ? ` [${a.group_name}]` : ''
-    const obs       = a.observacoes ? ` | Obs: ${a.observacoes}` : ''
+    const obsArr    = parseObsList(a.observacoes)
+    const obs       = obsArr.length ? ` | ${obsListToText(obsArr).replace(/\n/g, ' / ')}` : ''
     return `• [${a.pct ?? 0}% | ${a.status}]${grupo} ${a.name} S${a.week_start}–${a.week_end}${workers}${equipment}${obs}`
   }).join('\n')
 
@@ -160,7 +162,8 @@ export async function analisarFluxo({ obra, atividades, mensagem, historico = []
       .map(pid => byId[pid]?.name)
       .filter(Boolean)
     const predsTxt = preds.length ? ` | depende de: ${preds.join(', ')}` : ' | sem dependências (pode começar a qualquer momento)'
-    const motivo = a.status === 'atrasado' && a.observacoes ? ` | motivo da parada: ${a.observacoes}` : ''
+    const obsArr = parseObsList(a.observacoes)
+    const motivo = a.status === 'atrasado' && obsArr.length ? ` | motivo da parada: ${obsListToText(obsArr).replace(/\n/g, ' / ')}` : ''
     return `• [${a.status} | ${a.pct ?? 0}%] ${a.name}${a.group_name ? ` (${a.group_name})` : ''}${predsTxt}${motivo}`
   }
 

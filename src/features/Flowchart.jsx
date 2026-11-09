@@ -31,6 +31,7 @@ import {
   unlinkReportFromActivity,
 } from '../lib/supabase'
 import { analisarFluxo } from '../lib/ai'
+import { parseObsList, stringifyObsList, obsListToText } from '../lib/obs'
 
 const STATUS_OPTIONS = [
   { value: 'nao_iniciado', label: 'Não iniciado' },
@@ -116,7 +117,8 @@ function ActivityNode({ data }) {
   const mats = data.materials || []
   const sc = STATUS_COLORS[a.status] || STATUS_COLORS.nao_iniciado
   const gcolor = groupColor(a.group_name || 'Geral')
-  const hasObs = !!(a.observacoes && a.observacoes.trim())
+  const obsList = parseObsList(a.observacoes)
+  const hasObs = obsList.length > 0
   const matsUrgent = mats.some(m => m.status === 'urgente')
   const matsPendente = mats.some(m => m.status === 'pendente' || m.status === 'pedido')
   const matsAllOk = mats.length > 0 && mats.every(m => m.status === 'chegou')
@@ -194,7 +196,7 @@ function ActivityNode({ data }) {
         {showAlert && (
           <div
             title={[
-              hasObs ? `Observação: ${a.observacoes}` : null,
+              hasObs ? obsListToText(obsList) : null,
               mats.length ? `${mats.length} material(is): ${mats.map(m => `${m.name}${m.responsible_name ? ' (' + m.responsible_name + ')' : ''}`).join(', ')}` : null,
             ].filter(Boolean).join('\n')}
             style={{
@@ -204,7 +206,7 @@ function ActivityNode({ data }) {
           >
             <Icon name={matsAllOk && !hasObs ? 'check' : 'warning'} size={13} color={alertColor} />
             <div style={{ fontSize: 11, color: alertColor, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {hasObs ? a.observacoes : matsAllOk ? `✓ Material OK: ${mats.map(m => m.name).join(', ')}` : `${mats.length} material${mats.length > 1 ? 'is' : ''}${mats.length ? ': ' + mats.map(m => m.name).join(', ') : ''}`}
+              {hasObs ? (obsList.length > 1 ? `${obsList.length} observações: ${obsList[0]}` : obsList[0]) : matsAllOk ? `✓ Material OK: ${mats.map(m => m.name).join(', ')}` : `${mats.length} material${mats.length > 1 ? 'is' : ''}${mats.length ? ': ' + mats.map(m => m.name).join(', ') : ''}`}
             </div>
           </div>
         )}
@@ -688,10 +690,26 @@ function NodeDetail({ activity, allActivities, materials, projectId, userId, onC
     pct: activity.pct ?? 0,
     week_start: activity.week_start ?? 1,
     week_end: activity.week_end ?? 1,
-    observacoes: activity.observacoes || '',
+  })
+  const [obsList, setObsList] = useState(() => {
+    const list = parseObsList(activity.observacoes)
+    return list.length ? list : ['']
   })
   const [saving, setSaving] = useState(false)
   const [savedMsg, setSavedMsg] = useState('')
+
+  function updateObs(idx, value) {
+    setObsList(list => list.map((o, i) => i === idx ? value : o))
+  }
+  function addObs() {
+    setObsList(list => [...list, ''])
+  }
+  function removeObs(idx) {
+    setObsList(list => {
+      const next = list.filter((_, i) => i !== idx)
+      return next.length ? next : ['']
+    })
+  }
 
   async function handleSaveGeral() {
     setSaving(true)
@@ -703,7 +721,7 @@ function NodeDetail({ activity, allActivities, materials, projectId, userId, onC
         pct: Number(form.pct) || 0,
         week_start: Number(form.week_start) || 1,
         week_end: Number(form.week_end) || 1,
-        observacoes: form.observacoes || null,
+        observacoes: stringifyObsList(obsList),
       }
       if (patch.status === 'concluido') patch.pct = 100
       const { error } = await updateActivityFields(activity.id, patch)
@@ -789,14 +807,50 @@ function NodeDetail({ activity, allActivities, materials, projectId, userId, onC
               </div>
             </div>
             <div>
-              <Label>{form.status === 'atrasado' ? 'Motivo da parada' : 'Observação'}</Label>
-              <Textarea
-                rows={3}
-                placeholder={form.status === 'atrasado' ? '⚠ Por que essa etapa parou?' : 'Observação...'}
-                value={form.observacoes}
-                onChange={e => setForm(f => ({ ...f, observacoes: e.target.value }))}
-                style={form.status === 'atrasado' ? { borderColor: C.red, background: C.redLight } : {}}
-              />
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 2 }}>
+                <Label style={{ marginBottom: 0 }}>{form.status === 'atrasado' ? 'Motivo da parada' : 'Observações'}</Label>
+                <button
+                  type="button"
+                  onClick={addObs}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 4, background: 'none', border: 'none',
+                    cursor: 'pointer', color: C.orange, fontSize: 11, fontWeight: 700, padding: '2px 4px',
+                  }}
+                >
+                  <Icon name="plus" size={12} color={C.orange} /> Add obs
+                </button>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {obsList.map((obs, idx) => (
+                  <div key={idx} style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 10, color: C.gray400, fontWeight: 700, marginBottom: 2 }}>
+                        Obs {String(idx + 1).padStart(2, '0')}
+                      </div>
+                      <Textarea
+                        rows={2}
+                        placeholder={form.status === 'atrasado' && idx === 0 ? '⚠ Por que essa etapa parou?' : 'Observação...'}
+                        value={obs}
+                        onChange={e => updateObs(idx, e.target.value)}
+                        style={form.status === 'atrasado' && idx === 0 ? { borderColor: C.red, background: C.redLight } : {}}
+                      />
+                    </div>
+                    {(obsList.length > 1 || obs) && (
+                      <button
+                        type="button"
+                        onClick={() => removeObs(idx)}
+                        title="Remover observação"
+                        style={{
+                          marginTop: 16, background: 'none', border: 'none', cursor: 'pointer',
+                          color: C.gray400, padding: 2,
+                        }}
+                      >
+                        <Icon name="x" size={14} color={C.gray400} />
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
             </div>
 
             {preds.length > 0 && (
