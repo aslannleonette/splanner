@@ -698,6 +698,15 @@ function NodeDetail({ activity, allActivities, materials, projectId, userId, onC
   const [saving, setSaving] = useState(false)
   const [savedMsg, setSavedMsg] = useState('')
 
+  const existingGroups = useMemo(() => {
+    const set = new Set()
+    allActivities.forEach(a => { if (a.group_name) set.add(a.group_name) })
+    set.add(form.group_name || 'Geral')
+    return Array.from(set).sort((x, y) => x.localeCompare(y, 'pt-BR'))
+  }, [allActivities, form.group_name])
+
+  const [creatingGroup, setCreatingGroup] = useState(false)
+
   function updateObs(idx, value) {
     setObsList(list => list.map((o, i) => i === idx ? value : o))
   }
@@ -782,7 +791,43 @@ function NodeDetail({ activity, allActivities, materials, projectId, userId, onC
             </div>
             <div>
               <Label>Grupo</Label>
-              <Input value={form.group_name} onChange={e => setForm(f => ({ ...f, group_name: e.target.value }))} />
+              {creatingGroup ? (
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <Input
+                    autoFocus
+                    placeholder="Nome do novo grupo"
+                    value={form.group_name}
+                    onChange={e => setForm(f => ({ ...f, group_name: e.target.value }))}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setCreatingGroup(false)}
+                    title="Escolher grupo existente"
+                    style={{
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      width: 38, border: `1px solid ${C.gray200}`, borderRadius: 8,
+                      background: C.gray100, cursor: 'pointer', color: C.gray500,
+                    }}
+                  >
+                    <Icon name="x" size={14} color={C.gray500} />
+                  </button>
+                </div>
+              ) : (
+                <Select
+                  value={form.group_name}
+                  onChange={e => {
+                    if (e.target.value === '__new__') {
+                      setForm(f => ({ ...f, group_name: '' }))
+                      setCreatingGroup(true)
+                    } else {
+                      setForm(f => ({ ...f, group_name: e.target.value }))
+                    }
+                  }}
+                >
+                  {existingGroups.map(g => <option key={g} value={g}>{g}</option>)}
+                  <option value="__new__">+ Criar novo grupo…</option>
+                </Select>
+              )}
             </div>
             <div style={{ display: 'flex', gap: 10 }}>
               <div style={{ flex: 1 }}>
