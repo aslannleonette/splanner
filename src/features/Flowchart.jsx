@@ -1374,43 +1374,71 @@ function RelatorioTab({ activity, projectId }) {
   )
 }
 
+// Normaliza nomes de etapa pra casar mesmo com pequenas diferenças de acento/
+// caixa/espaço entre o que a IA devolveu e o nome real cadastrado.
+function normalizeActName(s) {
+  return (s || '')
+    .toString()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+function buildActByNameIndex(activities) {
+  const byName = new Map()
+  activities.forEach(a => byName.set(normalizeActName(a.name), a))
+  return byName
+}
+function findActivityByName(rawName, byName, activities) {
+  const key = normalizeActName(rawName)
+  if (!key) return null
+  if (byName.has(key)) return byName.get(key)
+  // Fallback: o nome pode vir levemente diferente (abreviado, reescrito) —
+  // tenta achar por correspondência parcial antes de desistir.
+  const hit = activities.find(a => {
+    const an = normalizeActName(a.name)
+    return an.includes(key) || key.includes(an)
+  })
+  return hit || null
+}
+
 // A IA responde em texto + propõe diretivas de reorganização ao final:
 //   LIGAR: [etapa] → depende de: [predecessora 1, predecessora 2]
 //   PRAZO: [etapa] → semana_inicio: N, semana_fim: M
 // Essas funções leem essas linhas e traduzem pros ids reais das atividades.
 function parseLigarDirectives(text, activities) {
-  const byName = new Map(activities.map(a => [a.name.trim().toLowerCase(), a]))
+  const byName = buildActByNameIndex(activities)
   const out = []
   text.split('\n').forEach(line => {
     const m = line.match(/^LIGAR:\s*\[(.+?)\]\s*→\s*depende de:\s*\[(.*?)\]\s*$/)
     if (!m) return
-    const act = byName.get(m[1].trim().toLowerCase())
+    const act = findActivityByName(m[1], byName, activities)
     if (!act) return
     const predIds = m[2].split(',').map(s => s.trim()).filter(Boolean)
-      .map(n => byName.get(n.toLowerCase())?.id).filter(Boolean)
+      .map(n => findActivityByName(n, byName, activities)?.id).filter(Boolean)
     out.push({ id: act.id, predecessor_ids: predIds })
   })
   return out
 }
 function parsePrazoDirectives(text, activities) {
-  const byName = new Map(activities.map(a => [a.name.trim().toLowerCase(), a]))
+  const byName = buildActByNameIndex(activities)
   const out = []
   text.split('\n').forEach(line => {
     const m = line.match(/^PRAZO:\s*\[(.+?)\]\s*→\s*semana_inicio:\s*(\d+),\s*semana_fim:\s*(\d+)/)
     if (!m) return
-    const act = byName.get(m[1].trim().toLowerCase())
+    const act = findActivityByName(m[1], byName, activities)
     if (!act) return
     out.push({ id: act.id, week_start: Number(m[2]), week_end: Number(m[3]) })
   })
   return out
 }
 function parseRenomearDirectives(text, activities) {
-  const byName = new Map(activities.map(a => [a.name.trim().toLowerCase(), a]))
+  const byName = buildActByNameIndex(activities)
   const out = []
   text.split('\n').forEach(line => {
     const m = line.match(/^RENOMEAR:\s*\[(.+?)\]\s*→\s*novo nome:\s*\[(.+?)\]\s*$/)
     if (!m) return
-    const act = byName.get(m[1].trim().toLowerCase())
+    const act = findActivityByName(m[1], byName, activities)
     if (!act) return
     const novoNome = m[2].trim()
     if (!novoNome) return
@@ -1418,17 +1446,37 @@ function parseRenomearDirectives(text, activities) {
   })
   return out
 }
+// DESLIGAR: [etapa] → remove depende de: [predecessora]
+// Remove UMA dependência específica sem mexer nas outras da mesma etapa —
+// diferente de LIGAR, que substitui a lista inteira. Permite a IA "barrar"
+// (desfazer) uma conexão pontual que o usuário pediu pra desfazer.
+function parseDesligarDirectives(text, activities) {
+  const byName = buildActByNameIndex(activities)
+  const out = []
+  text.split('\n').forEach(line => {
+    const m = line.match(/^DESLIGAR:\s*\[(.+?)\]\s*→\s*remove depende de:\s*\[(.+?)\]\s*$/)
+    if (!m) return
+    const act = findActivityByName(m[1], byName, activities)
+    const pred = findActivityByName(m[2], byName, activities)
+    if (!act || !pred) return
+    out.push({ id: act.id, removeId: pred.id, removeName: pred.name })
+  })
+  return out
+}
 function stripDirectiveLines(text) {
-  return text.split('\n').filter(l => !/^LIGAR:/.test(l) && !/^PRAZO:/.test(l) && !/^RENOMEAR:/.test(l)).join('\n').trim()
+  return text.split('\n').filter(l => !/^LIGAR:/.test(l) && !/^PRAZO:/.test(l) && !/^RENOMEAR:/.test(l) && !/^DESLIGAR:/.test(l)).join('\n').trim()
 }
 
 // Descreve em português, linha a linha, o que cada diretiva da IA vai mudar
 // — mostrado ANTES de aplicar, pra pedir confirmação do usuário.
-function buildChangeDescriptions(ligar, prazo, renomear, activities) {
+function buildChangeDescriptions(ligar, prazo, renomear, desligar, activities) {
   const byId = Object.fromEntries(activities.map(a => [a.id, a]))
   const lines = []
   renomear.forEach(({ id, name }) => {
     lines.push(`✏️ "${byId[id]?.name || '?'}" → novo nome: "${name}"`)
+  })
+  ;(desligar || []).forEach(({ id, removeName }) => {
+    lines.push(`🚫 "${byId[id]?.name || '?'}" → remove a dependência de "${removeName}"`)
   })
   ligar.forEach(({ id, predecessor_ids }) => {
     const nome = byId[id]?.name || '?'
@@ -1448,8 +1496,21 @@ function buildChangeDescriptions(ligar, prazo, renomear, activities) {
 // primeiro — o usuário vê exatamente o que vai mudar e precisa confirmar —
 // e, uma vez aplicada, o próprio fluxograma destaca (e centraliza a vista
 // n)as etapas alteradas, mostrando onde a mudança aconteceu.
-function AIFluxoPanel({ project, activities, currentWeek, isMobile, onSaveAiLog, onApplyDirectives, onHighlight, onClose }) {
-  const [history, setHistory] = useState([])
+function AIFluxoPanel({ project, activities, currentWeek, isMobile, aiLogs = [], onSaveAiLog, onApplyDirectives, onHighlight, onClose }) {
+  // Carrega a conversa salva (ai_logs com source='fluxograma') pra IA lembrar
+  // dos pedidos anteriores mesmo depois de fechar e reabrir o painel.
+  const [history, setHistory] = useState(() => {
+    const relevant = (aiLogs || [])
+      .filter(l => l.source === 'fluxograma')
+      .slice()
+      .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
+    const msgs = []
+    relevant.forEach(l => {
+      if (l.user_question) msgs.push({ role: 'user', content: l.user_question })
+      if (l.ai_response) msgs.push({ role: 'assistant', content: l.ai_response })
+    })
+    return msgs
+  })
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -1469,18 +1530,29 @@ function AIFluxoPanel({ project, activities, currentWeek, isMobile, onSaveAiLog,
         mensagem: msg,
         historico: history,
       })
-      const ligar = parseLigarDirectives(resposta, activities)
+      const ligarRaw = parseLigarDirectives(resposta, activities)
       const prazo = parsePrazoDirectives(resposta, activities)
       const renomear = parseRenomearDirectives(resposta, activities)
+      const desligar = parseDesligarDirectives(resposta, activities)
       const cleanText = stripDirectiveLines(resposta)
-      const hasChanges = ligar.length > 0 || prazo.length > 0 || renomear.length > 0
+      // DESLIGAR vira um LIGAR pontual (predecessor_ids atual menos a removida)
+      // pra reaproveitar a mesma aplicação no banco — sem mexer nas outras
+      // dependências da etapa. Se já existe um LIGAR explícito pra mesma
+      // etapa, ele manda (é a lista completa e definitiva).
+      const ligarIds = new Set(ligarRaw.map(x => x.id))
+      const byIdAtual = Object.fromEntries(activities.map(a => [a.id, a]))
+      const desligarAsLigar = desligar
+        .filter(d => !ligarIds.has(d.id))
+        .map(d => ({ id: d.id, predecessor_ids: (byIdAtual[d.id]?.predecessor_ids || []).filter(pid => pid !== d.removeId) }))
+      const ligarForDb = [...ligarRaw, ...desligarAsLigar]
+      const hasChanges = ligarForDb.length > 0 || prazo.length > 0 || renomear.length > 0
       if (hasChanges) {
-        const descriptions = buildChangeDescriptions(ligar, prazo, renomear, activities)
-        setHistory(h => [...h, { role: 'assistant', content: cleanText, pendingChange: { ligar, prazo, renomear, descriptions } }])
+        const descriptions = buildChangeDescriptions(ligarRaw, prazo, renomear, desligar, activities)
+        setHistory(h => [...h, { role: 'assistant', content: cleanText, pendingChange: { ligar: ligarForDb, prazo, renomear, descriptions } }])
       } else {
         setHistory(h => [...h, { role: 'assistant', content: cleanText }])
       }
-      onSaveAiLog?.({ week: currentWeek || null, user_question: msg, ai_response: cleanText })
+      onSaveAiLog?.({ week: currentWeek || null, user_question: msg, ai_response: cleanText, source: 'fluxograma' })
     } catch (err) {
       setError(err.message || 'Erro ao consultar a IA.')
     } finally {

@@ -205,14 +205,17 @@ INSTRUÇÕES:
 
 AÇÃO NA REDE (obrigatório quando fizer sentido): depois do texto, se encontrar etapa sem predecessor correto, com predecessor errado, com prazo (semana) incompatível com a sequência, ou com nome mal escrito/genérico demais, liste as correções — uma por linha, nesse formato EXATO, usando os nomes EXATOS das etapas acima:
 LIGAR: [nome exato da etapa] → depende de: [nome exato predecessora 1, nome exato predecessora 2]
+DESLIGAR: [nome exato da etapa] → remove depende de: [nome exato predecessora]
 PRAZO: [nome exato da etapa] → semana_inicio: N, semana_fim: M
 RENOMEAR: [nome exato atual da etapa] → novo nome: [nome novo]
 
 Regras dessas linhas de ação:
-- LIGAR substitui TODAS as dependências atuais da etapa pelas listadas — se a etapa não deve ter nenhuma predecessora (é a primeira da obra), não gere linha LIGAR pra ela
+- LIGAR substitui TODAS as dependências atuais da etapa pelas listadas — se a etapa não deve ter nenhuma predecessora (é a primeira da obra), não gere linha LIGAR pra ela. Use LIGAR quando for definir a lista completa e correta de predecessoras de uma etapa (reorganização, correção de sequência, ou o usuário pedindo pra conectar/ligar uma etapa a outra(s))
+- DESLIGAR: use quando o usuário pedir pra DESCONECTAR, REMOVER, BARRAR ou DESFAZER uma dependência específica entre duas etapas nomeadas (ex: "desconecta X de Y", "tira a dependência de Y em X", "X não precisa mais depender de Y") — remove só esse vínculo pontual, sem mexer nas outras dependências que a etapa já tem. Não recalcule a lista inteira pra isso, só gere a linha DESLIGAR
 - Nem toda etapa precisa depender da anterior numa fila única: etapas COMPLEMENTARES/paralelas (ex: elétrico e hidráulico andando juntos depois da alvenaria) devem compartilhar a MESMA predecessora, sem depender uma da outra — isso faz elas aparecerem lado a lado no mesmo nível do fluxo, formando frentes paralelas de verdade, não uma fila única
-- RENOMEAR só quando o nome atual estiver claramente errado, truncado, duplicado ou genérico demais para o serviço descrito — nunca renomeie só por preferência de estilo
-- Só gere LIGAR/PRAZO/RENOMEAR quando houver uma correção real a fazer. Se o usuário pedir explicitamente para reorganizar tudo, gere LIGAR e PRAZO para todas as etapas (mesmo as que já estão corretas, para confirmar), identificando corretamente quais são sequenciais e quais são paralelas/complementares
+- RENOMEAR: se o usuário PEDIU EXPLICITAMENTE pra renomear/mudar o nome de uma etapa (ex: "renomeia X pra Y", "troca o nome de X pra Y", "muda o nome da etapa X", "chama isso de Y"), SEMPRE gere a linha RENOMEAR com o nome exato pedido por ele — mesmo que o nome atual não pareça "errado". Fora desse caso (você decidindo sozinho, ex: ao reorganizar o fluxograma inteiro), só sugira RENOMEAR quando o nome atual estiver claramente errado, truncado, duplicado ou genérico demais — nunca renomeie por preferência de estilo quando ninguém pediu
+- Só gere LIGAR/DESLIGAR/PRAZO/RENOMEAR quando houver uma correção real a fazer OU quando o usuário pediu explicitamente aquela mudança. Se o usuário pedir explicitamente para reorganizar tudo, gere LIGAR e PRAZO para todas as etapas (mesmo as que já estão corretas, para confirmar), identificando corretamente quais são sequenciais e quais são paralelas/complementares
+- Se o usuário pedir uma alteração específica (renomear, mudar prazo, ligar/desligar dependência) e você gerar a linha de ação correspondente, SEMPRE use o nome EXATO da etapa como aparece em "REDE DE ETAPAS" acima — nunca abrevie, corrija acentuação ou reescreva o nome, ou a ação não vai ser reconhecida pelo sistema
 - Nunca invente etapas que não estão na lista acima`
 
   const msgs = [
