@@ -146,12 +146,15 @@ function ActivityNode({ data }) {
           width: 280,
           background: C.white,
           borderRadius: 12,
-          border: `1.5px solid ${C.gray200}`,
+          border: data.highlighted ? `1.5px solid ${C.orange}` : `1.5px solid ${C.gray200}`,
           borderLeft: `6px solid ${gcolor}`,
-          boxShadow: '0 2px 10px rgba(0,0,0,0.08)',
+          boxShadow: data.highlighted
+            ? `0 0 0 5px ${C.orange}33, 0 2px 16px rgba(232,80,10,0.35)`
+            : '0 2px 10px rgba(0,0,0,0.08)',
           padding: '14px 16px',
           fontFamily: FONT_BODY,
           cursor: 'pointer',
+          transition: 'box-shadow 0.25s ease, border-color 0.25s ease',
         }}
         title="Clique para abrir os detalhes da etapa"
       >
@@ -491,18 +494,21 @@ export default function Flowchart({ projectId, userId, project, activities = [],
   // lado a lado, centralizadas — um fluxo organizado e enquadrado.
   const [applyingAi, setApplyingAi] = useState(false)
   async function handleApplyAiDirectives(ligarList, prazoList, renomearList = []) {
-    if (!ligarList.length && !prazoList.length && !renomearList.length) return { applied: 0 }
+    if (!ligarList.length && !prazoList.length && !renomearList.length) return { applied: 0, changedIds: [], changedNames: [] }
     setApplyingAi(true)
     try {
       const working = activities.map(a => ({ ...a }))
-      const byId = Object.fromEntries(working.map(a => [a.id, a]))
-      ligarList.forEach(({ id, predecessor_ids }) => { if (byId[id]) byId[id].predecessor_ids = predecessor_ids })
+      const byIdWorking = Object.fromEntries(working.map(a => [a.id, a]))
+      ligarList.forEach(({ id, predecessor_ids }) => { if (byIdWorking[id]) byIdWorking[id].predecessor_ids = predecessor_ids })
       prazoList.forEach(({ id, week_start, week_end }) => {
-        if (byId[id]) { byId[id].week_start = week_start; byId[id].week_end = week_end }
+        if (byIdWorking[id]) { byIdWorking[id].week_start = week_start; byIdWorking[id].week_end = week_end }
       })
-      renomearList.forEach(({ id, name }) => { if (byId[id]) byId[id].name = name })
+      renomearList.forEach(({ id, name }) => { if (byIdWorking[id]) byIdWorking[id].name = name })
       const framed = computeFramedPositions(working)
-      const touchedIds = new Set([...ligarList.map(x => x.id), ...prazoList.map(x => x.id), ...renomearList.map(x => x.id)])
+      // ids explicitamente apontados pela IA (o que o usuário pediu pra mudar)
+      // — usado pra destacar no fluxograma onde a alteração aconteceu.
+      const directiveIds = new Set([...ligarList.map(x => x.id), ...prazoList.map(x => x.id), ...renomearList.map(x => x.id)])
+      const touchedIds = new Set(directiveIds)
       let applied = 0
       for (const a of working) {
         const newPos = framed[a.id] || { x: 0, y: 0 }
@@ -521,10 +527,26 @@ export default function Flowchart({ projectId, userId, project, activities = [],
         if (error) { setSaveError('Não consegui aplicar a reorganização da IA: ' + error.message); continue }
         applied++
       }
-      return { applied }
+      const changedIds = Array.from(directiveIds)
+      const changedNames = changedIds.map(id => byIdWorking[id]?.name).filter(Boolean)
+      return { applied, changedIds, changedNames }
     } finally {
       setApplyingAi(false)
     }
+  }
+
+  // Destaca (borda laranja temporária) e centraliza a vista nas etapas que a
+  // IA acabou de alterar, pra mostrar exatamente onde a alteração aconteceu.
+  const highlightTimer = useRef(null)
+  function highlightActivities(ids) {
+    if (!ids || !ids.length) return
+    const idSet = new Set(ids)
+    setNodes(nds => nds.map(n => idSet.has(n.id) ? { ...n, data: { ...n.data, highlighted: true } } : n))
+    flowInstance?.fitView({ nodes: ids.map(id => ({ id })), duration: 500, padding: 0.4, maxZoom: 1.2 })
+    if (highlightTimer.current) clearTimeout(highlightTimer.current)
+    highlightTimer.current = setTimeout(() => {
+      setNodes(nds => nds.map(n => n.data?.highlighted ? { ...n, data: { ...n.data, highlighted: false } } : n))
+    }, 4500)
   }
 
   // Botão "+" do card: insere uma nova etapa logo depois desta na cadeia
@@ -831,7 +853,9 @@ export default function Flowchart({ projectId, userId, project, activities = [],
           activities={activities}
           aiLogs={aiLogs}
           currentWeek={currentWeek}
+          isMobile={isMobile}
           onApplyDirectives={handleApplyAiDirectives}
+          onHighlight={highlightActivities}
           onSaveAiLog={onSaveAiLog}
           onClose={() => setAiOpen(false)}
         />
@@ -1398,8 +1422,33 @@ function stripDirectiveLines(text) {
   return text.split('\n').filter(l => !/^LIGAR:/.test(l) && !/^PRAZO:/.test(l) && !/^RENOMEAR:/.test(l)).join('\n').trim()
 }
 
+// Descreve em português, linha a linha, o que cada diretiva da IA vai mudar
+// — mostrado ANTES de aplicar, pra pedir confirmação do usuário.
+function buildChangeDescriptions(ligar, prazo, renomear, activities) {
+  const byId = Object.fromEntries(activities.map(a => [a.id, a]))
+  const lines = []
+  renomear.forEach(({ id, name }) => {
+    lines.push(`✏️ "${byId[id]?.name || '?'}" → novo nome: "${name}"`)
+  })
+  ligar.forEach(({ id, predecessor_ids }) => {
+    const nome = byId[id]?.name || '?'
+    const preds = (predecessor_ids || []).map(pid => byId[pid]?.name).filter(Boolean)
+    lines.push(`🔗 "${nome}" → depende de: ${preds.length ? preds.join(', ') : 'nenhuma'}`)
+  })
+  prazo.forEach(({ id, week_start, week_end }) => {
+    const nome = byId[id]?.name || '?'
+    lines.push(`📅 "${nome}" → semana ${week_start}–${week_end}`)
+  })
+  return lines
+}
+
 // ─── Painel de IA do fluxograma ──────────────────────────────────────────────
-function AIFluxoPanel({ project, activities, currentWeek, onSaveAiLog, onApplyDirectives, onClose }) {
+// Flutua no canto da tela (igual um widget de chat), nunca ocupando a largura
+// inteira. Toda alteração no cronograma (LIGAR/PRAZO/RENOMEAR) é proposta
+// primeiro — o usuário vê exatamente o que vai mudar e precisa confirmar —
+// e, uma vez aplicada, o próprio fluxograma destaca (e centraliza a vista
+// n)as etapas alteradas, mostrando onde a mudança aconteceu.
+function AIFluxoPanel({ project, activities, currentWeek, isMobile, onSaveAiLog, onApplyDirectives, onHighlight, onClose }) {
   const [history, setHistory] = useState([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
@@ -1424,13 +1473,13 @@ function AIFluxoPanel({ project, activities, currentWeek, onSaveAiLog, onApplyDi
       const prazo = parsePrazoDirectives(resposta, activities)
       const renomear = parseRenomearDirectives(resposta, activities)
       const cleanText = stripDirectiveLines(resposta)
-      let appliedCount = 0
-      if ((ligar.length || prazo.length || renomear.length) && onApplyDirectives) {
-        const r = await onApplyDirectives(ligar, prazo, renomear)
-        appliedCount = r?.applied || 0
-        if (appliedCount) setApplied(a => a + appliedCount)
+      const hasChanges = ligar.length > 0 || prazo.length > 0 || renomear.length > 0
+      if (hasChanges) {
+        const descriptions = buildChangeDescriptions(ligar, prazo, renomear, activities)
+        setHistory(h => [...h, { role: 'assistant', content: cleanText, pendingChange: { ligar, prazo, renomear, descriptions } }])
+      } else {
+        setHistory(h => [...h, { role: 'assistant', content: cleanText }])
       }
-      setHistory(h => [...h, { role: 'assistant', content: cleanText, applied: appliedCount }])
       onSaveAiLog?.({ week: currentWeek || null, user_question: msg, ai_response: cleanText })
     } catch (err) {
       setError(err.message || 'Erro ao consultar a IA.')
@@ -1439,13 +1488,34 @@ function AIFluxoPanel({ project, activities, currentWeek, onSaveAiLog, onApplyDi
     }
   }
 
+  async function confirmChange(idx) {
+    const msg = history[idx]
+    if (!msg?.pendingChange || !onApplyDirectives) return
+    setHistory(h => h.map((m, i) => i === idx ? { ...m, resolving: true } : m))
+    const { ligar, prazo, renomear } = msg.pendingChange
+    const r = await onApplyDirectives(ligar, prazo, renomear)
+    const appliedCount = r?.applied || 0
+    if (appliedCount) setApplied(a => a + appliedCount)
+    onHighlight?.(r?.changedIds || [])
+    setHistory(h => h.map((m, i) => i === idx ? { ...m, resolving: false, resolved: 'applied', appliedNames: r?.changedNames || [] } : m))
+  }
+
+  function cancelChange(idx) {
+    setHistory(h => h.map((m, i) => i === idx ? { ...m, resolved: 'cancelled' } : m))
+  }
+
   return (
     <div style={{
-      position: 'absolute', left: 0, right: 0, bottom: 0, zIndex: 30,
-      height: 'min(60%, 480px)', background: C.white, borderTop: `1px solid ${C.gray200}`,
-      boxShadow: '0 -6px 24px rgba(0,0,0,0.15)', display: 'flex', flexDirection: 'column', fontFamily: FONT_BODY,
+      position: 'absolute', zIndex: 30,
+      right: isMobile ? 12 : 20, left: isMobile ? 12 : 'auto',
+      bottom: isMobile ? 84 : 86,
+      width: isMobile ? 'auto' : 380,
+      maxHeight: 'min(70vh, 560px)',
+      background: C.white, borderRadius: 16, border: `1px solid ${C.gray200}`,
+      boxShadow: '0 12px 40px rgba(0,0,0,0.25)',
+      display: 'flex', flexDirection: 'column', fontFamily: FONT_BODY, overflow: 'hidden',
     }}>
-      <div style={{ padding: '10px 14px', borderBottom: `1px solid ${C.gray200}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+      <div style={{ padding: '10px 14px', borderBottom: `1px solid ${C.gray200}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <Icon name="chat" size={16} color={C.orange} />
           <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 800, fontSize: 14, color: C.black }}>IA DO FLUXOGRAMA</div>
@@ -1455,25 +1525,45 @@ function AIFluxoPanel({ project, activities, currentWeek, onSaveAiLog, onApplyDi
         </button>
       </div>
 
-      <div style={{ flex: 1, overflowY: 'auto', padding: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ flex: 1, overflowY: 'auto', padding: 14, display: 'flex', flexDirection: 'column', gap: 10, minHeight: 160 }}>
         {history.length === 0 && (
           <div style={{ fontSize: 13, color: C.gray500 }}>
-            Sou um agente ativo: além de responder, conecto etapas soltas e ajusto prazos incoerentes direto na rede. Pergunte algo ou use "Reorganizar tudo" pra eu revisar o fluxograma inteiro.
+            Sou um agente ativo: posso conectar etapas soltas e ajustar prazos incoerentes direto na rede — sempre te mostrando o que vai mudar antes, e pedindo confirmação. Pergunte algo ou use "Reorganizar tudo" pra eu revisar o fluxograma inteiro.
           </div>
         )}
         {history.map((m, i) => (
           <div key={i} style={{
             alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
-            maxWidth: '85%', padding: '8px 12px', borderRadius: 10,
+            maxWidth: '90%', padding: '8px 12px', borderRadius: 10,
             background: m.role === 'user' ? C.orange : C.gray100,
             color: m.role === 'user' ? C.white : C.black,
             fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap',
           }}>
             {m.content}
-            {m.applied > 0 && (
-              <div style={{ marginTop: 8, padding: '6px 10px', background: 'rgba(255,255,255,0.5)', borderRadius: 6, fontSize: 11, fontWeight: 700, color: C.orange }}>
-                ✓ {m.applied} etapa(s) reorganizada(s) automaticamente no fluxograma
+
+            {m.pendingChange && !m.resolved && (
+              <div style={{ marginTop: 8, padding: '8px 10px', background: C.white, border: `1px solid ${C.gray200}`, borderRadius: 8 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, marginBottom: 4, color: C.black }}>Alterações propostas no cronograma:</div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 2, marginBottom: 8 }}>
+                  {m.pendingChange.descriptions.map((d, di) => (
+                    <div key={di} style={{ fontSize: 11, color: C.gray700 }}>{d}</div>
+                  ))}
+                </div>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <Btn size="sm" icon="check" onClick={() => confirmChange(i)} disabled={m.resolving}>
+                    {m.resolving ? 'Aplicando...' : 'Confirmar'}
+                  </Btn>
+                  <Btn size="sm" variant="secondary" onClick={() => cancelChange(i)} disabled={m.resolving}>Cancelar</Btn>
+                </div>
               </div>
+            )}
+            {m.resolved === 'applied' && (
+              <div style={{ marginTop: 8, padding: '6px 10px', background: 'rgba(255,255,255,0.5)', borderRadius: 6, fontSize: 11, fontWeight: 700, color: C.orange }}>
+                ✓ Alterado no fluxograma{m.appliedNames?.length ? `: ${m.appliedNames.join(', ')}` : ''}
+              </div>
+            )}
+            {m.resolved === 'cancelled' && (
+              <div style={{ marginTop: 8, fontSize: 11, color: C.gray500 }}>✗ Alteração cancelada — nada foi mudado.</div>
             )}
           </div>
         ))}
@@ -1481,10 +1571,10 @@ function AIFluxoPanel({ project, activities, currentWeek, onSaveAiLog, onApplyDi
         {error && <Alert type="error">{error}</Alert>}
       </div>
 
-      <div style={{ padding: '0 12px 8px', fontSize: 10, color: C.gray400 }}>
-        {applied > 0 && `${applied} reorganização(ões) aplicada(s) nesta sessão`}
+      <div style={{ padding: '0 12px 8px', fontSize: 10, color: C.gray400, flexShrink: 0 }}>
+        {applied > 0 && `${applied} alteração(ões) aplicada(s) nesta sessão`}
       </div>
-      <div style={{ padding: 12, borderTop: `1px solid ${C.gray200}`, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+      <div style={{ padding: 12, borderTop: `1px solid ${C.gray200}`, display: 'flex', gap: 8, flexWrap: 'wrap', flexShrink: 0 }}>
         <Btn size="sm" variant="secondary" onClick={() => send('Reorganize completamente o fluxograma: defina a predecessora correta de cada etapa (sequência real de construção) e ajuste as semanas de início/fim de todas para não haver sobreposição ilógica. Gere LIGAR e PRAZO para TODAS as etapas, mesmo as que já estão certas.')} disabled={loading}>🔄 Reorganizar tudo</Btn>
         <Btn size="sm" variant="secondary" onClick={() => send('Qual o andamento geral e o que está travado?')} disabled={loading}>Andamento</Btn>
         <Btn size="sm" variant="secondary" onClick={() => send('Quais os próximos passos recomendados?')} disabled={loading}>Próximos passos</Btn>
