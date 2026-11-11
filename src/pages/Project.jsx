@@ -218,6 +218,18 @@ export default function Project() {
     await updateProject(id, { current_week: newWeek })
   }
 
+  async function handleAddWeeks(n) {
+    if (!project || !n || n <= 0) return
+    const newWeeks = (project.weeks || 1) + n
+    setProject(p => p ? { ...p, weeks: newWeeks } : p)
+    try {
+      await updateProject(id, { weeks: newWeeks })
+    } catch (err) {
+      console.error('Erro ao adicionar semanas:', err)
+      setProject(p => p ? { ...p, weeks: project.weeks } : p)
+    }
+  }
+
   if (loading) {
     return (
       <div style={{ minHeight: '100vh', background: C.gray50, fontFamily: FONT_BODY }}>
@@ -468,6 +480,7 @@ export default function Project() {
             activities={activities}
             weeks={totalWeeks}
             onUpdate={handleActivitiesUpdate}
+            onAddWeeks={handleAddWeeks}
             startDate={project.start_date}
             currentWeek={currentWeek}
             projectId={id}

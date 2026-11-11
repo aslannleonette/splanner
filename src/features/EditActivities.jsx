@@ -1229,7 +1229,7 @@ function AddActivityRow({ weeks, onAdd }) {
 }
 
 /* ── MAIN ──────────────────────────────────────────────── */
-export default function EditActivities({ activities = [], weeks = 20, onUpdate, startDate = null, currentWeek = null, projectId = null, userId = null }) {
+export default function EditActivities({ activities = [], weeks = 20, onUpdate, onAddWeeks, startDate = null, currentWeek = null, projectId = null, userId = null }) {
   // LOCAL STATE — changes stay here until user hits Salvar
   const [local, setLocal] = useState(() => activities)
   const [isDirty, setIsDirty] = useState(false)
@@ -1240,6 +1240,9 @@ export default function EditActivities({ activities = [], weeks = 20, onUpdate, 
   const [showAddGroup, setShowAddGroup] = useState(false)
   const [showAI, setShowAI] = useState(false)
   const [showCalendar, setShowCalendar] = useState(false)
+  const [showAddWeeks, setShowAddWeeks] = useState(false)
+  const [addWeeksQty, setAddWeeksQty] = useState(4)
+  const [addingWeeks, setAddingWeeks] = useState(false)
 
   const weekCalendar = buildWeekCalendar(startDate, weeks)
   // currentWeek is passed as prop from Project (already computed from start_date)
@@ -1318,6 +1321,19 @@ export default function EditActivities({ activities = [], weeks = 20, onUpdate, 
     setShowAddGroup(false)
   }
 
+  async function handleAddWeeksConfirm() {
+    const n = parseInt(addWeeksQty, 10)
+    if (!n || n <= 0 || !onAddWeeks) { setShowAddWeeks(false); return }
+    setAddingWeeks(true)
+    try {
+      await onAddWeeks(n)
+      setShowAddWeeks(false)
+      setAddWeeksQty(4)
+    } finally {
+      setAddingWeeks(false)
+    }
+  }
+
   function handleAddDefaultGroups() {
     mutate([...local, ...GRUPOS_PADRAO.map(g => ({ id: genUUID(), name: '', group_name: g, tipo: 'exec', week_start: 1, week_end: 1, pct: 0, status: 'nao_iniciado', observacoes: '' }))])
   }
@@ -1358,6 +1374,9 @@ export default function EditActivities({ activities = [], weeks = 20, onUpdate, 
             Calendário de semanas
           </Btn>
           <Btn variant="black" size="sm" icon="plus" onClick={() => setShowAddGroup(s => !s)}>Novo grupo</Btn>
+          {onAddWeeks && (
+            <Btn variant="secondary" size="sm" icon="plus" onClick={() => setShowAddWeeks(s => !s)}>Criar semanas</Btn>
+          )}
 
           {/* Cancel */}
           {isDirty && (
@@ -1408,6 +1427,28 @@ export default function EditActivities({ activities = [], weeks = 20, onUpdate, 
           />
           <Btn variant="black" size="sm" onClick={handleAddGroup}>Criar grupo</Btn>
           <Btn variant="ghost" size="sm" onClick={() => setShowAddGroup(false)}>Cancelar</Btn>
+        </div>
+      )}
+
+      {/* Add weeks input */}
+      {showAddWeeks && (
+        <div style={{ display: 'flex', gap: 10, marginBottom: 16, padding: '12px 16px', background: C.gray50, borderRadius: 8, border: `1px solid ${C.gray200}`, alignItems: 'center' }}>
+          <span style={{ fontSize: 13, color: C.gray700, fontWeight: 600 }}>Adicionar</span>
+          <input
+            type="number"
+            min={1}
+            value={addWeeksQty}
+            onChange={e => setAddWeeksQty(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && handleAddWeeksConfirm()}
+            autoFocus
+            style={{ width: 70, fontFamily: FONT_BODY, fontSize: 13, padding: '7px 10px', border: `1px solid ${C.gray300}`, borderRadius: 6, outline: 'none', color: C.black, background: C.white, textAlign: 'center' }}
+          />
+          <span style={{ fontSize: 13, color: C.gray700, fontWeight: 600 }}>semana(s) ao cronograma</span>
+          <span style={{ fontSize: 12, color: C.gray500 }}>(total atual: {weeks})</span>
+          <Btn variant="black" size="sm" onClick={handleAddWeeksConfirm} disabled={addingWeeks}>
+            {addingWeeks ? 'Adicionando…' : 'Confirmar'}
+          </Btn>
+          <Btn variant="ghost" size="sm" onClick={() => setShowAddWeeks(false)}>Cancelar</Btn>
         </div>
       )}
 
