@@ -236,7 +236,68 @@ function ActivityNode({ data }) {
   )
 }
 
-const nodeTypes = { activityNode: ActivityNode }
+// ─── Balão satélite (materiais / equipamentos / observações) ─────────────────
+// Pequenos nós conectados à etapa, tipo mapa mental (Obsidian) dentro do
+// próprio fluxo — clicar abre a aba correspondente no painel da etapa.
+function BalloonNode({ data }) {
+  return (
+    <div
+      onClick={(e) => { e.stopPropagation(); data.onOpen?.() }}
+      title={data.title}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 5,
+        background: C.white, border: `1.5px solid ${data.color}`,
+        borderRadius: 999, padding: '5px 11px', fontSize: 11, fontWeight: 700,
+        color: data.color, boxShadow: '0 1px 5px rgba(0,0,0,0.12)',
+        cursor: 'pointer', whiteSpace: 'nowrap', fontFamily: FONT_BODY,
+      }}
+    >
+      <Icon name={data.icon} size={12} color={data.color} />
+      {data.label}
+    </div>
+  )
+}
+
+const nodeTypes = { activityNode: ActivityNode, balloonNode: BalloonNode }
+
+// Gera os balões satélites de uma etapa (materiais, equipamentos, observações)
+// posicionados ao redor do card, como filhos num mapa mental.
+function buildBalloons(a, pos, mats) {
+  const out = []
+  const equip = a.equipment || []
+  const obsArr = parseObsList(a.observacoes)
+  if (mats.length) {
+    out.push({
+      key: 'mat', icon: 'package', color: C.amber,
+      label: `${mats.length} material${mats.length > 1 ? 'is' : ''}`,
+      title: mats.map(m => `${m.name} (${m.status})`).join('\n'),
+      offset: { x: -70, y: 236 }, tab: 'mat',
+    })
+  }
+  if (equip.length) {
+    out.push({
+      key: 'equip', icon: 'construction', color: C.blue,
+      label: `${equip.length} equip.`,
+      title: equip.map(e => typeof e === 'string' ? e : (e.qty > 1 ? `${e.qty}x ${e.name}` : e.name)).join('\n'),
+      offset: { x: 230, y: 236 }, tab: 'equipe',
+    })
+  }
+  if (obsArr.length) {
+    out.push({
+      key: 'obs', icon: 'warning', color: C.red,
+      label: `${obsArr.length} obs.`,
+      title: obsListToText(obsArr),
+      offset: { x: 80, y: -78 }, tab: 'geral',
+    })
+  }
+  return out.map(b => ({
+    id: `${a.id}__${b.key}`,
+    activityId: a.id,
+    tab: b.tab,
+    position: { x: pos.x + b.offset.x, y: pos.y + b.offset.y },
+    icon: b.icon, color: b.color, label: b.label, title: b.title,
+  }))
+}
 
 // ─── Main component ─────────────────────────────────────────────────────────
 export default function Flowchart({ projectId, userId, project, activities = [], materials = [], currentWeek, aiLogs = [], onActivityPatch, onActivityCreated, onActivityDeleted, onSaveAiLog }) {
@@ -254,18 +315,38 @@ export default function Flowchart({ projectId, userId, project, activities = [],
     return s
   }, [activities])
 
-  const initialNodes = useMemo(() => activities.map(a => ({
-    id: a.id,
-    type: 'activityNode',
-    position: positions[a.id] || { x: 0, y: 0 },
-    data: {
-      activity: a,
-      materials: materialsByActivity[a.id] || [],
-      hasDependents: hasDependentsSet.has(a.id),
-      onOpen: (act) => setOpenNode(act),
-      onInsertAfter: (act) => handleInsertAfter(act),
-    },
-  })), [activities, positions, materialsByActivity, hasDependentsSet]) // eslint-disable-line
+  const initialNodes = useMemo(() => {
+    const out = activities.map(a => ({
+      id: a.id,
+      type: 'activityNode',
+      position: positions[a.id] || { x: 0, y: 0 },
+      data: {
+        activity: a,
+        materials: materialsByActivity[a.id] || [],
+        hasDependents: hasDependentsSet.has(a.id),
+        onOpen: (act) => { setOpenTab('geral'); setOpenNode(act) },
+        onInsertAfter: (act) => handleInsertAfter(act),
+      },
+    }))
+    activities.forEach(a => {
+      const pos = positions[a.id] || { x: 0, y: 0 }
+      const mats = materialsByActivity[a.id] || []
+      buildBalloons(a, pos, mats).forEach(b => {
+        out.push({
+          id: b.id,
+          type: 'balloonNode',
+          position: b.position,
+          draggable: false,
+          selectable: false,
+          data: {
+            icon: b.icon, color: b.color, label: b.label, title: b.title,
+            onOpen: () => { setOpenTab(b.tab); setOpenNode(a) },
+          },
+        })
+      })
+    })
+    return out
+  }, [activities, positions, materialsByActivity, hasDependentsSet]) // eslint-disable-line
 
   const byId = useMemo(() => Object.fromEntries(activities.map(a => [a.id, a])), [activities])
 
@@ -283,13 +364,25 @@ export default function Flowchart({ projectId, userId, project, activities = [],
           style: { stroke: dashed ? C.red : (a.status === 'concluido' ? C.green : '#9CA3AF'), strokeWidth: 2, strokeDasharray: dashed ? '5 4' : undefined },
         })
       })
+      const pos = positions[a.id] || { x: 0, y: 0 }
+      const mats = materialsByActivity[a.id] || []
+      buildBalloons(a, pos, mats).forEach(b => {
+        out.push({
+          id: `${a.id}->${b.id}`,
+          source: a.id,
+          target: b.id,
+          selectable: false,
+          style: { stroke: C.gray300, strokeWidth: 1.25, strokeDasharray: '2 3' },
+        })
+      })
     })
     return out
-  }, [activities, byId])
+  }, [activities, byId, positions, materialsByActivity])
 
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes)
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges)
   const [openNode, setOpenNode] = useState(null)
+  const [openTab, setOpenTab] = useState('geral')
   const [aiOpen, setAiOpen] = useState(false)
   const [saveError, setSaveError] = useState('')
   const [showHelp, setShowHelp] = useState(false)
@@ -383,8 +476,8 @@ export default function Flowchart({ projectId, userId, project, activities = [],
   // vira uma linha, tarefas paralelas/complementares do mesmo nível ficam
   // lado a lado, centralizadas — um fluxo organizado e enquadrado.
   const [applyingAi, setApplyingAi] = useState(false)
-  async function handleApplyAiDirectives(ligarList, prazoList) {
-    if (!ligarList.length && !prazoList.length) return { applied: 0 }
+  async function handleApplyAiDirectives(ligarList, prazoList, renomearList = []) {
+    if (!ligarList.length && !prazoList.length && !renomearList.length) return { applied: 0 }
     setApplyingAi(true)
     try {
       const working = activities.map(a => ({ ...a }))
@@ -393,14 +486,16 @@ export default function Flowchart({ projectId, userId, project, activities = [],
       prazoList.forEach(({ id, week_start, week_end }) => {
         if (byId[id]) { byId[id].week_start = week_start; byId[id].week_end = week_end }
       })
+      renomearList.forEach(({ id, name }) => { if (byId[id]) byId[id].name = name })
       const framed = computeFramedPositions(working)
-      const touchedIds = new Set([...ligarList.map(x => x.id), ...prazoList.map(x => x.id)])
+      const touchedIds = new Set([...ligarList.map(x => x.id), ...prazoList.map(x => x.id), ...renomearList.map(x => x.id)])
       let applied = 0
       for (const a of working) {
         const newPos = framed[a.id] || { x: 0, y: 0 }
         const changed = touchedIds.has(a.id) || Number(a.flow_y) !== newPos.y || Number(a.flow_x) !== newPos.x
         if (!changed) continue
         const patch = {
+          name: a.name,
           predecessor_ids: a.predecessor_ids || [],
           week_start: a.week_start,
           week_end: a.week_end,
@@ -646,6 +741,7 @@ export default function Flowchart({ projectId, userId, project, activities = [],
           materials={materials}
           projectId={projectId}
           userId={userId}
+          initialTab={openTab}
           onClose={() => setOpenNode(null)}
           onPatch={(patch) => onActivityPatch?.(openNode.id, patch)}
           onDelete={async () => {
@@ -681,8 +777,9 @@ const DETAIL_TABS = [
   { key: 'rel',     label: 'Relatório',   icon: 'chart'   },
 ]
 
-function NodeDetail({ activity, allActivities, materials, projectId, userId, onClose, onPatch, onDelete }) {
-  const [tab, setTab] = useState('geral')
+function NodeDetail({ activity, allActivities, materials, projectId, userId, initialTab, onClose, onPatch, onDelete }) {
+  const [tab, setTab] = useState(initialTab || 'geral')
+  useEffect(() => { if (initialTab) setTab(initialTab) }, [initialTab])
   const [form, setForm] = useState({
     name: activity.name || '',
     group_name: activity.group_name || 'Geral',
@@ -1211,8 +1308,22 @@ function parsePrazoDirectives(text, activities) {
   })
   return out
 }
+function parseRenomearDirectives(text, activities) {
+  const byName = new Map(activities.map(a => [a.name.trim().toLowerCase(), a]))
+  const out = []
+  text.split('\n').forEach(line => {
+    const m = line.match(/^RENOMEAR:\s*\[(.+?)\]\s*→\s*novo nome:\s*\[(.+?)\]\s*$/)
+    if (!m) return
+    const act = byName.get(m[1].trim().toLowerCase())
+    if (!act) return
+    const novoNome = m[2].trim()
+    if (!novoNome) return
+    out.push({ id: act.id, name: novoNome })
+  })
+  return out
+}
 function stripDirectiveLines(text) {
-  return text.split('\n').filter(l => !/^LIGAR:/.test(l) && !/^PRAZO:/.test(l)).join('\n').trim()
+  return text.split('\n').filter(l => !/^LIGAR:/.test(l) && !/^PRAZO:/.test(l) && !/^RENOMEAR:/.test(l)).join('\n').trim()
 }
 
 // ─── Painel de IA do fluxograma ──────────────────────────────────────────────
@@ -1239,10 +1350,11 @@ function AIFluxoPanel({ project, activities, currentWeek, onSaveAiLog, onApplyDi
       })
       const ligar = parseLigarDirectives(resposta, activities)
       const prazo = parsePrazoDirectives(resposta, activities)
+      const renomear = parseRenomearDirectives(resposta, activities)
       const cleanText = stripDirectiveLines(resposta)
       let appliedCount = 0
-      if ((ligar.length || prazo.length) && onApplyDirectives) {
-        const r = await onApplyDirectives(ligar, prazo)
+      if ((ligar.length || prazo.length || renomear.length) && onApplyDirectives) {
+        const r = await onApplyDirectives(ligar, prazo, renomear)
         appliedCount = r?.applied || 0
         if (appliedCount) setApplied(a => a + appliedCount)
       }

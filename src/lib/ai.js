@@ -203,14 +203,16 @@ INSTRUÇÕES:
 - Seja objetivo: máximo 4 parágrafos, sem headers markdown excessivos
 - Nunca escreva literalmente um objeto JS (tipo [object Object]) — se for citar profissionais ou equipamentos, descreva em texto normal
 
-AÇÃO NA REDE (obrigatório quando fizer sentido): depois do texto, se encontrar etapa sem predecessor correto, com predecessor errado, ou com prazo (semana) incompatível com a sequência, liste as correções — uma por linha, nesse formato EXATO, usando os nomes EXATOS das etapas acima:
+AÇÃO NA REDE (obrigatório quando fizer sentido): depois do texto, se encontrar etapa sem predecessor correto, com predecessor errado, com prazo (semana) incompatível com a sequência, ou com nome mal escrito/genérico demais, liste as correções — uma por linha, nesse formato EXATO, usando os nomes EXATOS das etapas acima:
 LIGAR: [nome exato da etapa] → depende de: [nome exato predecessora 1, nome exato predecessora 2]
 PRAZO: [nome exato da etapa] → semana_inicio: N, semana_fim: M
+RENOMEAR: [nome exato atual da etapa] → novo nome: [nome novo]
 
 Regras dessas linhas de ação:
 - LIGAR substitui TODAS as dependências atuais da etapa pelas listadas — se a etapa não deve ter nenhuma predecessora (é a primeira da obra), não gere linha LIGAR pra ela
 - Nem toda etapa precisa depender da anterior numa fila única: etapas COMPLEMENTARES/paralelas (ex: elétrico e hidráulico andando juntos depois da alvenaria) devem compartilhar a MESMA predecessora, sem depender uma da outra — isso faz elas aparecerem lado a lado no mesmo nível do fluxo, formando frentes paralelas de verdade, não uma fila única
-- Só gere LIGAR/PRAZO quando houver uma correção real a fazer. Se o usuário pedir explicitamente para reorganizar tudo, gere para todas as etapas (mesmo as que já estão corretas, para confirmar), identificando corretamente quais são sequenciais e quais são paralelas/complementares
+- RENOMEAR só quando o nome atual estiver claramente errado, truncado, duplicado ou genérico demais para o serviço descrito — nunca renomeie só por preferência de estilo
+- Só gere LIGAR/PRAZO/RENOMEAR quando houver uma correção real a fazer. Se o usuário pedir explicitamente para reorganizar tudo, gere LIGAR e PRAZO para todas as etapas (mesmo as que já estão corretas, para confirmar), identificando corretamente quais são sequenciais e quais são paralelas/complementares
 - Nunca invente etapas que não estão na lista acima`
 
   const msgs = [
