@@ -339,8 +339,8 @@ export default function Flowchart({ projectId, userId, project, activities = [],
           id: b.id,
           type: 'balloonNode',
           position: b.position,
-          draggable: false,
-          selectable: false,
+          draggable: true,
+          selectable: true,
           data: {
             icon: b.icon, color: b.color, label: b.label, title: b.title,
             onOpen: () => setBalloonPopup({ activityId: a.id, activityName: a.name, icon: b.icon, color: b.color, label: b.label, title: b.title, tab: b.tab }),
@@ -453,13 +453,23 @@ export default function Flowchart({ projectId, userId, project, activities = [],
   }, [byId, onActivityPatch])
 
   const onNodeDragStop = useCallback((evt, node) => {
+    // Balõezinhos são livres pra arrastar, mas não têm posição persistida no
+    // banco (só servem de atalho visual) — move só localmente.
+    if (node.type === 'balloonNode' || !byId[node.id]) return
     // Cards são livres — o usuário posiciona onde quiser.
     const flow_x = node.position.x, flow_y = node.position.y
     onActivityPatch?.(node.id, { flow_x, flow_y })
     updateActivityFields(node.id, { flow_x, flow_y })
       .then(({ error }) => { if (error) setSaveError('Não consegui salvar a posição: ' + error.message) })
       .catch(err => setSaveError('Não consegui salvar a posição: ' + (err?.message || 'erro desconhecido')))
-  }, [onActivityPatch, setNodes])
+  }, [byId, onActivityPatch, setNodes])
+
+  // Clique num nó — se for um balãozinho, abre o popup com a informação
+  // (via onNodeClick do próprio React Flow, mais confiável do que o onClick
+  // interno do card, que podia ser engolido pelo drag/seleção do canvas).
+  const onNodeClick = useCallback((evt, node) => {
+    if (node.type === 'balloonNode') node.data?.onOpen?.()
+  }, [])
 
   // Duplo clique num nó cancela (remove) os vínculos de dependência dele
   const onNodeDoubleClick = useCallback((evt, node) => {
@@ -596,6 +606,7 @@ export default function Flowchart({ projectId, userId, project, activities = [],
           onConnect={onConnect}
           onEdgesDelete={onEdgesDelete}
           onNodeDragStop={onNodeDragStop}
+          onNodeClick={onNodeClick}
           onNodeDoubleClick={onNodeDoubleClick}
           onInit={setFlowInstance}
           deleteKeyCode={['Backspace', 'Delete']}
