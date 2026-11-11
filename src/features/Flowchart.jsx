@@ -1406,15 +1406,24 @@ function findActivityByName(rawName, byName, activities) {
 //   LIGAR: [etapa] → depende de: [predecessora 1, predecessora 2]
 //   PRAZO: [etapa] → semana_inicio: N, semana_fim: M
 // Essas funções leem essas linhas e traduzem pros ids reais das atividades.
+// Os "[colchetes]" no formato pedido ao modelo (ex: "LIGAR: [etapa] →
+// depende de: [predecessora]") são só notação de "preencha aqui" — o GPT
+// quase nunca ecoa os colchetes literalmente na resposta. Por isso todo
+// parser abaixo tira colchetes residuais antes de casar o texto, em vez de
+// EXIGIR que eles existam (exigir colchetes fazia toda diretiva (LIGAR/
+// PRAZO/RENOMEAR/DESLIGAR) falhar silenciosamente o tempo todo).
+function stripBrackets(s) {
+  return (s || '').replace(/[[\]]/g, '').trim()
+}
 function parseLigarDirectives(text, activities) {
   const byName = buildActByNameIndex(activities)
   const out = []
   text.split('\n').forEach(line => {
-    const m = line.match(/^LIGAR:\s*\[(.+?)\]\s*→\s*depende de:\s*\[(.*?)\]\s*$/)
+    const m = line.match(/^LIGAR:\s*(.+?)\s*→\s*depende de:\s*(.*?)\s*$/)
     if (!m) return
-    const act = findActivityByName(m[1], byName, activities)
+    const act = findActivityByName(stripBrackets(m[1]), byName, activities)
     if (!act) return
-    const predIds = m[2].split(',').map(s => s.trim()).filter(Boolean)
+    const predIds = stripBrackets(m[2]).split(',').map(s => s.trim()).filter(Boolean)
       .map(n => findActivityByName(n, byName, activities)?.id).filter(Boolean)
     out.push({ id: act.id, predecessor_ids: predIds })
   })
@@ -1424,9 +1433,9 @@ function parsePrazoDirectives(text, activities) {
   const byName = buildActByNameIndex(activities)
   const out = []
   text.split('\n').forEach(line => {
-    const m = line.match(/^PRAZO:\s*\[(.+?)\]\s*→\s*semana_inicio:\s*(\d+),\s*semana_fim:\s*(\d+)/)
+    const m = line.match(/^PRAZO:\s*(.+?)\s*→\s*semana_inicio:\s*(\d+),\s*semana_fim:\s*(\d+)/)
     if (!m) return
-    const act = findActivityByName(m[1], byName, activities)
+    const act = findActivityByName(stripBrackets(m[1]), byName, activities)
     if (!act) return
     out.push({ id: act.id, week_start: Number(m[2]), week_end: Number(m[3]) })
   })
@@ -1436,11 +1445,13 @@ function parseRenomearDirectives(text, activities) {
   const byName = buildActByNameIndex(activities)
   const out = []
   text.split('\n').forEach(line => {
-    const m = line.match(/^RENOMEAR:\s*\[(.+?)\]\s*→\s*novo nome:\s*\[(.+?)\]\s*$/)
+    // Aceita tanto "RENOMEAR: X → novo nome: Y" quanto "RENOMEAR: X → Y"
+    // (o GPT às vezes omite o "novo nome:").
+    const m = line.match(/^RENOMEAR:\s*(.+?)\s*→\s*(?:novo nome:\s*)?(.+?)\s*$/)
     if (!m) return
-    const act = findActivityByName(m[1], byName, activities)
+    const act = findActivityByName(stripBrackets(m[1]), byName, activities)
     if (!act) return
-    const novoNome = m[2].trim()
+    const novoNome = stripBrackets(m[2])
     if (!novoNome) return
     out.push({ id: act.id, name: novoNome })
   })
@@ -1454,10 +1465,10 @@ function parseDesligarDirectives(text, activities) {
   const byName = buildActByNameIndex(activities)
   const out = []
   text.split('\n').forEach(line => {
-    const m = line.match(/^DESLIGAR:\s*\[(.+?)\]\s*→\s*remove depende de:\s*\[(.+?)\]\s*$/)
+    const m = line.match(/^DESLIGAR:\s*(.+?)\s*→\s*remove depende de:\s*(.+?)\s*$/)
     if (!m) return
-    const act = findActivityByName(m[1], byName, activities)
-    const pred = findActivityByName(m[2], byName, activities)
+    const act = findActivityByName(stripBrackets(m[1]), byName, activities)
+    const pred = findActivityByName(stripBrackets(m[2]), byName, activities)
     if (!act || !pred) return
     out.push({ id: act.id, removeId: pred.id, removeName: pred.name })
   })
@@ -1530,11 +1541,17 @@ function AIFluxoPanel({ project, activities, currentWeek, isMobile, aiLogs = [],
         mensagem: msg,
         historico: history,
       })
+      if (!resposta || !resposta.trim()) {
+        throw new Error('A IA não retornou uma resposta. Tente novamente.')
+      }
       const ligarRaw = parseLigarDirectives(resposta, activities)
       const prazo = parsePrazoDirectives(resposta, activities)
       const renomear = parseRenomearDirectives(resposta, activities)
       const desligar = parseDesligarDirectives(resposta, activities)
-      const cleanText = stripDirectiveLines(resposta)
+      // Se a resposta inteira era só linha(s) de diretiva (comum quando o
+      // pedido é curto, tipo "ajuste os nomes"), stripDirectiveLines pode
+      // zerar o texto — nesse caso mostramos uma frase padrão em vez de
+      // deixar o balão do chat em branco (parecia a IA travada).
       // DESLIGAR vira um LIGAR pontual (predecessor_ids atual menos a removida)
       // pra reaproveitar a mesma aplicação no banco — sem mexer nas outras
       // dependências da etapa. Se já existe um LIGAR explícito pra mesma
@@ -1546,6 +1563,7 @@ function AIFluxoPanel({ project, activities, currentWeek, isMobile, aiLogs = [],
         .map(d => ({ id: d.id, predecessor_ids: (byIdAtual[d.id]?.predecessor_ids || []).filter(pid => pid !== d.removeId) }))
       const ligarForDb = [...ligarRaw, ...desligarAsLigar]
       const hasChanges = ligarForDb.length > 0 || prazo.length > 0 || renomear.length > 0
+      const cleanText = stripDirectiveLines(resposta) || (hasChanges ? 'Ok, segue a alteração proposta:' : resposta.trim())
       if (hasChanges) {
         const descriptions = buildChangeDescriptions(ligarRaw, prazo, renomear, desligar, activities)
         setHistory(h => [...h, { role: 'assistant', content: cleanText, pendingChange: { ligar: ligarForDb, prazo, renomear, descriptions } }])
