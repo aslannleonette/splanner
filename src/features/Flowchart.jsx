@@ -245,6 +245,7 @@ function BalloonNode({ data }) {
       onClick={(e) => { e.stopPropagation(); data.onOpen?.() }}
       title={data.title}
       style={{
+        position: 'relative',
         display: 'flex', alignItems: 'center', gap: 5,
         background: C.white, border: `1.5px solid ${data.color}`,
         borderRadius: 999, padding: '5px 11px', fontSize: 11, fontWeight: 700,
@@ -252,6 +253,8 @@ function BalloonNode({ data }) {
         cursor: 'pointer', whiteSpace: 'nowrap', fontFamily: FONT_BODY,
       }}
     >
+      {/* Handle invisível — garante que a linha de conexão até o card de origem seja desenhada */}
+      <Handle type="target" position={Position.Top} style={{ opacity: 0, pointerEvents: 'none', width: 1, height: 1, left: '50%' }} />
       <Icon name={data.icon} size={12} color={data.color} />
       {data.label}
     </div>
@@ -340,7 +343,7 @@ export default function Flowchart({ projectId, userId, project, activities = [],
           selectable: false,
           data: {
             icon: b.icon, color: b.color, label: b.label, title: b.title,
-            onOpen: () => { setOpenTab(b.tab); setOpenNode(a) },
+            onOpen: () => setBalloonPopup({ activityId: a.id, activityName: a.name, icon: b.icon, color: b.color, label: b.label, title: b.title, tab: b.tab }),
           },
         })
       })
@@ -372,7 +375,7 @@ export default function Flowchart({ projectId, userId, project, activities = [],
           source: a.id,
           target: b.id,
           selectable: false,
-          style: { stroke: C.gray300, strokeWidth: 1.25, strokeDasharray: '2 3' },
+          style: { stroke: b.color, strokeWidth: 1.5, strokeDasharray: '3 3', opacity: 0.55 },
         })
       })
     })
@@ -389,6 +392,7 @@ export default function Flowchart({ projectId, userId, project, activities = [],
   const [flowInstance, setFlowInstance] = useState(null)
   const [panel, setPanel] = useState(null) // null | 'search' | 'summary'
   const [query, setQuery] = useState('')
+  const [balloonPopup, setBalloonPopup] = useState(null)
 
   function focusActivity(act) {
     const node = nodes.find(n => n.id === act.id)
@@ -751,6 +755,63 @@ export default function Flowchart({ projectId, userId, project, activities = [],
             setOpenNode(null)
           }}
         />
+      )}
+
+      {balloonPopup && (
+        <div
+          onClick={() => setBalloonPopup(null)}
+          style={{
+            position: 'absolute', inset: 0, zIndex: 25,
+            background: 'rgba(0,0,0,0.28)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: 320, maxWidth: '90%', maxHeight: '70%', background: C.white,
+              borderRadius: 14, border: `1.5px solid ${balloonPopup.color}`,
+              boxShadow: '0 12px 40px rgba(0,0,0,0.3)', padding: 16,
+              display: 'flex', flexDirection: 'column', fontFamily: FONT_BODY,
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+              <div style={{
+                width: 26, height: 26, borderRadius: '50%', background: balloonPopup.color + '22',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+              }}>
+                <Icon name={balloonPopup.icon} size={13} color={balloonPopup.color} />
+              </div>
+              <div style={{ fontWeight: 800, fontSize: 14, color: balloonPopup.color, flex: 1 }}>
+                {balloonPopup.label}
+              </div>
+              <button onClick={() => setBalloonPopup(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.gray400, padding: 2 }}>
+                <Icon name="x" size={16} />
+              </button>
+            </div>
+            <div style={{ fontSize: 10, color: C.gray400, letterSpacing: '0.04em', textTransform: 'uppercase', marginBottom: 10 }}>
+              Etapa: {balloonPopup.activityName}
+            </div>
+            <div style={{
+              fontSize: 13, color: C.black, lineHeight: 1.6, whiteSpace: 'pre-wrap',
+              overflowY: 'auto', flex: 1, marginBottom: 12,
+            }}>
+              {balloonPopup.title || 'Sem informações.'}
+            </div>
+            <Btn
+              size="sm"
+              onClick={() => {
+                const act = byId[balloonPopup.activityId]
+                setOpenTab(balloonPopup.tab)
+                if (act) setOpenNode(act)
+                setBalloonPopup(null)
+              }}
+              style={{ justifyContent: 'center' }}
+            >
+              Abrir etapa completa
+            </Btn>
+          </div>
+        </div>
       )}
 
       {aiOpen && (
